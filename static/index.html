@@ -629,7 +629,7 @@ function hRow(l,v){ return '<div class="flex items-center justify-between px-3 p
 function emptyState(msg){ return '<div class="flex items-center justify-center h-20 text-xs font-mono text-slate-400">'+msg+'</div>'; }
 function pill(text,cls){ return '<span class="text-xs px-2 py-0.5 rounded-full border font-mono font-semibold '+cls+'">'+text+'</span>'; }
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8000';
 let token = localStorage.getItem('tt_token') || null;
 let currentUser = JSON.parse(localStorage.getItem('tt_user') || 'null');
 let pendingEmail = null;
@@ -1086,7 +1086,7 @@ async function sendMessage(){
   addMsg('user',text,[],false,0,iv);showTyping();setLoading(true);
   if(!apiOk){
     await new Promise(r=>setTimeout(r,400));
-    removeTyping();addMsg('bot','API non connectée. Lancez : python src\\api_tinyllama.py');setLoading(false);return;
+    removeTyping();addMsg('bot','API non connectée. Lancez : python api_v5.py');setLoading(false);return;
   }
   var ctrl=new AbortController();var tid=setTimeout(()=>ctrl.abort(),120000);
   try{
