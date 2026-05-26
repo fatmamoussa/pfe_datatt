@@ -1,51 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 =============================================================
-API v1.2 — Chatbot Tunisie Telecom — Phi-3.5-mini-instruct
-Adapté depuis api_v1.1
-
-MODIFICATIONS v1.2 (CORRECTIFS MODE GÉNÉRATIF) :
-  [FIX-1] MIN_CONTEXT_COVERAGE abaissé 0.20 → 0.10
-          → La validation rejetait ~100% des réponses Phi
-            car les chunks PDF bruités ont peu de mots
-            communs avec la réponse générée
-
-  [FIX-2] _validate_phi_response() assouplie :
-          - Contexte étendu aux chunks RAW (pas seulement
-            le contexte nettoyé fourni au prompt)
-          - Seuil overlap copie relevé 0.85 → 0.92
-          - chunks passés en paramètre pour élargir
-            la comparaison de coverage
-
-  [FIX-3] Contexte RAG élargi dans _build_rag_context()
-          - 550/700 chars → 900/1200 chars
-          - Séparateur | entre chunks pour délimiter
-          - 3 chunks au lieu de 2
-
-  [FIX-4] Verrou CUDA _cuda_generation_lock ajouté
-          → évite les crashs silencieux si deux
-            requêtes arrivent simultanément
-
-  [FIX-5] Métriques de rejet détaillées par raison
-          validation_rejection_reasons (Counter)
-          → facilite le débogage futur
-
-Structure attendue :
-    rag_fromscratch/
-    ├── api_phi35.py          ← ce fichier
-    ├── auth_sqlite.py
-    ├── chroma_tt_db/
-    ├── data/
-    │   └── chatbot.db
-    └── models/
-        └── phi35-tt-merged/
-
-Lancement :
-    pip install fastapi uvicorn chromadb sentence-transformers rapidfuzz
-    python api_phi35.py
+API v1.6 — Chatbot Tunisie Telecom — Phi-3.5-mini-instruct
+CORRECTIONS v1.6 :
+  - MODEL_DIR = microsoft/Phi-3.5-mini-instruct (modele de base)
+  - MAX_INPUT_LENGTH 2048 (etait 1024)
+  - RAG_CONTEXT_CHARS reduit a 400/600 (evite troncature)
+  - PROMPT_LEAKS_PHI allege (moins de faux rejets)
+  - Prompts systeme en anglais (meilleure instruction-following)
+  - _clean_phi_output supprime "Response:" et fragments question
+  - temperature=None quand do_sample=False (evite le warning)
 =============================================================
 """
 
 import os, re, time, uuid, sqlite3, logging, threading, statistics, gc, asyncio
+import traceback
 import unicodedata
 import hashlib
 from collections import Counter, deque, OrderedDict
@@ -76,25 +46,19 @@ from auth_sqlite import (
 # CONFIG
 # ─────────────────────────────────────────────────────────────
 BASE_MODEL = "microsoft/Phi-3.5-mini-instruct"
-MODEL_DIR  = os.environ.get("MODEL_DIR", "models/phi35-tt-merged")
+# [FIX-v1.6] Modele de base par defaut
+MODEL_DIR  = os.environ.get("MODEL_DIR", "microsoft/Phi-3.5-mini-instruct")
 
 CONF_LOW             = float(os.environ.get("CONF_LOW", "0.55"))
 CONFIDENCE_THRESHOLD = CONF_LOW
 
-MAX_NEW_TOKENS     = int(os.environ.get("MAX_NEW_TOKENS", "200"))
-TEMPERATURE        = 0.0
-DO_SAMPLE          = False
+MAX_NEW_TOKENS     = int(os.environ.get("MAX_NEW_TOKENS", "180"))
 REPETITION_PENALTY = float(os.environ.get("REPETITION_PENALTY", "1.3"))
-GEN_TIMEOUT_S      = float(os.environ.get("GEN_TIMEOUT_S", "45.0"))
+GEN_TIMEOUT_S      = float(os.environ.get("GEN_TIMEOUT_S", "60.0"))
 
 SHORT_QUERY_MAX_WORDS = 4
 
-# [FIX-1] Seuil abaissé de 0.20 à 0.10
-# Les chunks PDF de Tunisie Telecom sont très bruités (codes USSD, tableaux
-# de tarifs, numéros de pages). Le coverage calculé entre la réponse générée
-# et le contexte nettoyé était quasi toujours sous 0.20, forçant le fallback
-# extractif sur TOUTES les réponses Phi.
-MIN_CONTEXT_COVERAGE = float(os.environ.get("MIN_CONTEXT_COVERAGE", "0.10"))
+MIN_CONTEXT_COVERAGE = float(os.environ.get("MIN_CONTEXT_COVERAGE", "0.04"))
 
 SEMANTIC_CACHE_ENABLED = os.environ.get("SEMANTIC_CACHE_ENABLED", "1") == "1"
 SEMANTIC_CACHE_SIZE    = int(os.environ.get("SEMANTIC_CACHE_SIZE", "256"))
@@ -111,11 +75,22 @@ API_PORT   = 8000
 MAX_HISTORY        = 10
 RAG_HISTORY_WINDOW = int(os.environ.get("RAG_HISTORY_WINDOW", "0"))
 
+# [FIX-v1.6] MAX_INPUT_LENGTH 2048
+MAX_INPUT_LENGTH = int(os.environ.get("MAX_INPUT_LENGTH", "2048"))
+
+# [FIX-v1.6] Contexte RAG reduit pour eviter troncature du prompt
+RAG_CONTEXT_CHARS_SIMPLE    = int(os.environ.get("RAG_CONTEXT_CHARS_SIMPLE",    "400"))
+RAG_CONTEXT_CHARS_MULTILINE = int(os.environ.get("RAG_CONTEXT_CHARS_MULTILINE", "600"))
+
+TORCH_COMPILE_PHI = os.environ.get("TORCH_COMPILE_PHI", "false").lower() == "true"
+MIN_FREE_VRAM_GB  = float(os.environ.get("MIN_FREE_VRAM_GB", "0.2"))
+USE_4BIT          = os.environ.get("USE_4BIT", "true").lower() == "true"
+
+GEN_MAX_RETRIES = int(os.environ.get("GEN_MAX_RETRIES", "2"))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# [FIX-4] Verrou CUDA pour éviter les crashs silencieux
-# lors de requêtes concurrentes sur PyTorch CUDA
 _cuda_generation_lock = threading.Lock()
 
 _metrics_lock = threading.Lock()
@@ -129,8 +104,13 @@ _global_metrics = {
     "rag_irrelevant_count": 0, "no_info_count": 0,
     "lang_rejected_count": 0,
     "arabic_query_count": 0,
-    # [FIX-5] Détail des raisons de rejet de validation
     "validation_rejection_reasons": Counter(),
+    "generative_error_oom": 0,
+    "generative_error_runtime": 0,
+    "generative_error_other": 0,
+    "generative_vram_skip": 0,
+    "generative_retry_success": 0,
+    "generative_retry_fail": 0,
 }
 
 _live_metrics_lock    = threading.Lock()
@@ -144,13 +124,13 @@ GREETINGS_FR = [
     "coucou","hey","allo","bj","good morning",
 ]
 GREETINGS_AR = [
-    "سلام","السلام عليكم","مرحبا","اهلا","صباح الخير","مساء الخير",
-    "أهلا","أهلاً وسهلاً","يسعد صباحك","يسعد مساك","هلا","salam",
+    "\u0633\u0644\u0627\u0645","\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645","\u0645\u0631\u062d\u0628\u0627","\u0627\u0647\u0644\u0627","\u0635\u0628\u0627\u062d \u0627\u0644\u062e\u064a\u0631","\u0645\u0633\u0627\u0621 \u0627\u0644\u062e\u064a\u0631",
+    "\u0623\u0647\u0644\u0627","\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b","\u064a\u0633\u0639\u062f \u0635\u0628\u0627\u062d\u0643","\u064a\u0633\u0639\u062f \u0645\u0633\u0627\u0643","\u0647\u0644\u0627","salam",
 ]
 GREETINGS = GREETINGS_FR + GREETINGS_AR
 
 GREETING_RESPONSE_FR = (
-    "Bonjour ! Je suis l'assistant virtuel de Tunisie Télécom.\n"
+    "Bonjour ! Je suis l'assistant virtuel de Tunisie Telecom.\n"
     "Je peux vous aider sur :\n"
     "- Les offres mobiles (Hayya, forfaits 4G/5G)\n"
     "- Internet fixe (ADSL, Fibre, NetBox)\n"
@@ -160,86 +140,74 @@ GREETING_RESPONSE_FR = (
 )
 
 GREETING_RESPONSE_AR = (
-    "مرحباً! أنا المساعد الافتراضي لـ Tunisie Télécom.\n"
-    "يمكنني مساعدتك في:\n"
-    "- عروض الهاتف المحمول (Hayya، باقات 4G/5G)\n"
-    "- الإنترنت الثابت (ADSL، Fibre، NetBox)\n"
-    "- الشحن والرصيد\n"
-    "- التجوال الدولي\n\n"
-    "كيف يمكنني مساعدتك؟"
+    "\u0645\u0631\u062d\u0628\u0627\u064b! \u0623\u0646\u0627 \u0627\u0644\u0645\u0633\u0627\u0639\u062f \u0627\u0644\u0627\u0641\u062a\u0631\u0627\u0636\u064a \u0644\u0640 Tunisie Telecom.\n"
+    "\u064a\u0645\u0643\u0646\u0646\u064a \u0645\u0633\u0627\u0639\u062f\u062a\u0643 \u0641\u064a:\n"
+    "- \u0639\u0631\u0648\u0636 \u0627\u0644\u0647\u0627\u062a\u0641 \u0627\u0644\u0645\u062d\u0645\u0648\u0644 (Hayya\u060c \u0628\u0627\u0642\u0627\u062a 4G/5G)\n"
+    "- \u0627\u0644\u0625\u0646\u062a\u0631\u0646\u062a \u0627\u0644\u062b\u0627\u0628\u062a (ADSL\u060c Fibre\u060c NetBox)\n"
+    "- \u0627\u0644\u0634\u062d\u0646 \u0648\u0627\u0644\u0631\u0635\u064a\u062f\n"
+    "- \u0627\u0644\u062a\u062c\u0648\u0627\u0644 \u0627\u0644\u062f\u0648\u0644\u064a\n\n"
+    "\u0643\u064a\u0641 \u064a\u0645\u0643\u0646\u0646\u064a \u0645\u0633\u0627\u0639\u062f\u062a\u0643\u061f"
 )
 
 LANG_NOT_SUPPORTED_MSG = (
-    "Je réponds uniquement en français et en arabe. / "
-    "أنا أجيب فقط باللغة الفرنسية والعربية."
+    "Je reponds uniquement en francais et en arabe. / "
+    "\u0623\u0646\u0627 \u0623\u062c\u064a\u0628 \u0641\u0642\u0637 \u0628\u0627\u0644\u0644\u063a\u0629 \u0627\u0644\u0641\u0631\u0646\u0633\u064a\u0629 \u0648\u0627\u0644\u0639\u0631\u0628\u064a\u0629."
 )
 
 HORS_SUJET_FR = (
-    "Je suis l'assistant Tunisie Telecom et je réponds uniquement "
+    "Je suis l'assistant Tunisie Telecom et je reponds uniquement "
     "aux questions sur nos offres et services."
 )
 HORS_SUJET_AR = (
-    "أنا مساعد Tunisie Télécom ولا أجيب إلا على الأسئلة المتعلقة "
-    "بعروضنا وخدماتنا."
+    "\u0623\u0646\u0627 \u0645\u0633\u0627\u0639\u062f Tunisie Telecom \u0648\u0644\u0627 \u0623\u062c\u064a\u0628 \u0625\u0644\u0627 \u0639\u0644\u0649 \u0627\u0644\u0623\u0633\u0626\u0644\u0629 \u0627\u0644\u0645\u062a\u0639\u0644\u0642\u0629 "
+    "\u0628\u0639\u0631\u0648\u0636\u0646\u0627 \u0648\u062e\u062f\u0645\u0627\u062a\u0646\u0627."
 )
 
 FALLBACK_NO_INFO_FR = (
-    "Je n'ai pas trouvé d'information précise sur ce sujet. "
+    "Je n'ai pas trouve d'information precise sur ce sujet. "
     "Contactez le service client au 1298."
 )
 FALLBACK_NO_INFO_AR = (
-    "لم أجد معلومات دقيقة حول هذا الموضوع. "
-    "يرجى التواصل مع خدمة العملاء على الرقم 1298."
+    "\u0644\u0645 \u0623\u062c\u062f \u0645\u0639\u0644\u0648\u0645\u0627\u062a \u062f\u0642\u064a\u0642\u0629 \u062d\u0648\u0644 \u0647\u0630\u0627 \u0627\u0644\u0645\u0648\u0636\u0648\u0639. "
+    "\u064a\u0631\u062c\u0649 \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u062e\u062f\u0645\u0629 \u0627\u0644\u0639\u0645\u0644\u0627\u0621 \u0639\u0644\u0649 \u0627\u0644\u0631\u0642\u0645 1298."
 )
 FALLBACK_NO_INFO = FALLBACK_NO_INFO_FR
 
-GENERATIVE_SYSTEM_PROMPT_AR = (
-    "أنت المساعد الرسمي لـ Tunisie Telecom. "
-    "تجيب فقط باستخدام المعلومات الواردة في السياق المقدم أدناه.\n"
-    "القواعد المطلقة:\n"
-    "1. لا تستخدم أبداً معرفتك العامة. السياق وحده هو المرجع.\n"
-    "2. إذا لم يتضمن السياق الإجابة، أجب بالضبط: "
-    "'لم أجد معلومات دقيقة حول هذا الموضوع. يرجى التواصل مع خدمة العملاء على الرقم 1298.'\n"
-    "3. أجب باللغة العربية في 2 إلى 6 جمل قصيرة ومباشرة.\n"
-    "4. لا تذكر Ooredoo أو Orange أو أي منافسين آخرين.\n"
-    "5. لا تخترع أي تعريفة أو رمز USSD أو عرضاً غير موجود في السياق."
-)
-
-GENERATIVE_SYSTEM_PROMPT_AR_MULTILINE = (
-    "أنت المساعد الرسمي لـ Tunisie Telecom. "
-    "تجيب فقط باستخدام المعلومات الواردة في السياق المقدم.\n"
-    "القواعد المطلقة:\n"
-    "1. لا تستخدم أبداً معرفتك العامة.\n"
-    "2. إذا لم يتضمن السياق الإجابة: "
-    "'لم أجد معلومات دقيقة. يرجى الاتصال بالرقم 1298.'\n"
-    "3. أجب باللغة العربية في 3 إلى 6 جمل. اذكر القنوات المتاحة إذا كان ذلك مناسباً.\n"
-    "4. لا تذكر أي منافسين.\n"
-    "5. لا تخترع أي خطوات أو رموز غير موجودة في السياق."
-)
-
+# ─────────────────────────────────────────────────────────────
+# [FIX-v1.6] PROMPTS SYSTEME EN ANGLAIS — meilleure instruction-following
+# ─────────────────────────────────────────────────────────────
 GENERATIVE_SYSTEM_PROMPT = (
-    "Tu es l'assistant officiel de Tunisie Telecom. "
-    "Tu réponds UNIQUEMENT en utilisant les informations du contexte fourni ci-dessous.\n"
-    "RÈGLES ABSOLUES :\n"
-    "1. N'utilise JAMAIS tes connaissances générales. Le contexte seul fait foi.\n"
-    "2. Si le contexte ne contient pas la réponse, réponds EXACTEMENT : "
-    "'Je n'ai pas trouvé d'information précise sur ce sujet. "
-    "Contactez le service client au 1298.'\n"
-    "3. Réponds en français, en 1 à 6 phrases courtes et directes.\n"
-    "4. Ne mentionne jamais Ooredoo, Orange ou d'autres opérateurs concurrents.\n"
-    "5. N'invente aucun tarif, code USSD ou offre absent du contexte."
+    "You are the official assistant of Tunisie Telecom. "
+    "Answer ONLY using the CONTEXT provided below. "
+    "Respond in French in 2-3 short sentences. "
+    "Do NOT use your general knowledge. "
+    "Do NOT repeat the question. "
+    "If the context does not contain the answer, respond exactly: "
+    "'Je n'ai pas trouve d'information precise. Contactez le 1298.' "
+    "Do NOT mention Ooredoo, Orange or Tunisiana."
 )
 
 GENERATIVE_SYSTEM_PROMPT_MULTILINE = (
-    "Tu es l'assistant officiel de Tunisie Telecom. "
-    "Tu réponds UNIQUEMENT en utilisant les informations du contexte fourni.\n"
-    "RÈGLES ABSOLUES :\n"
-    "1. N'utilise JAMAIS tes connaissances générales.\n"
-    "2. Si le contexte ne contient pas la réponse : "
-    "'Je n'ai pas trouvé d'information précise. Contactez le 1298.'\n"
-    "3. Réponds en français en 3 à 6 phrases. Liste les canaux disponibles si pertinent.\n"
-    "4. Ne mentionne jamais d'opérateurs concurrents.\n"
-    "5. N'invente aucune étape ou code absent du contexte."
+    "You are the official assistant of Tunisie Telecom. "
+    "Explain the steps from the CONTEXT below in 3-5 French sentences. "
+    "Use ONLY what is in the context. "
+    "Do NOT invent steps or codes. "
+    "If not found, respond: 'Contactez le 1298.'"
+)
+
+GENERATIVE_SYSTEM_PROMPT_AR = (
+    "You are the official assistant of Tunisie Telecom. "
+    "Answer ONLY using the CONTEXT provided below. "
+    "Respond in Arabic in 2-3 sentences. "
+    "Do NOT use general knowledge. "
+    "If not found, respond: '\u064a\u0631\u062c\u0649 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u0628\u0627\u0644\u0631\u0642\u0645 1298.'"
+)
+
+GENERATIVE_SYSTEM_PROMPT_AR_MULTILINE = (
+    "You are the official assistant of Tunisie Telecom. "
+    "Explain the steps from the CONTEXT below in 3-5 Arabic sentences. "
+    "Use ONLY what is in the context. "
+    "If not found, respond: '\u064a\u0631\u062c\u0649 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u0628\u0627\u0644\u0631\u0642\u0645 1298.'"
 )
 
 TELECOM_KEYWORDS = [
@@ -271,9 +239,9 @@ TELECOM_KEYWORDS = [
     "assistance","carte","fonctionne","disponible","cout","coute",
     "taraji","mouzikti","sport","jeu","game","tv","streaming","tourist",
     "samifehri","sami","fehri","svod","lorawan","m2m","iot","elissa",
-    "انترنت","شبكة","رصيد","شحن","عرض","عروض","اشتراك","تفعيل",
-    "باقة","باقات","مكالمة","رسالة","بيانات","تجوال","فاتورة",
-    "خدمة","خدمات","هاتف","موبايل","سيم","رقم","تحويل",
+    "\u0627\u0646\u062a\u0631\u0646\u062a","\u0634\u0628\u0643\u0629","\u0631\u0635\u064a\u062f","\u0634\u062d\u0646","\u0639\u0631\u0636","\u0639\u0631\u0648\u0636","\u0627\u0634\u062a\u0631\u0627\u0643","\u062a\u0641\u0639\u064a\u0644",
+    "\u0628\u0627\u0642\u0629","\u0628\u0627\u0642\u0627\u062a","\u0645\u0643\u0627\u0644\u0645\u0629","\u0631\u0633\u0627\u0644\u0629","\u0628\u064a\u0627\u0646\u0627\u062a","\u062a\u062c\u0648\u0627\u0644","\u0641\u0627\u062a\u0648\u0631\u0629",
+    "\u062e\u062f\u0645\u0629","\u062e\u062f\u0645\u0627\u062a","\u0647\u0627\u062a\u0641","\u0645\u0648\u0628\u0627\u064a\u0644","\u0633\u064a\u0645","\u0631\u0642\u0645","\u062a\u062d\u0648\u064a\u0644",
 ]
 
 TELECOM_PRODUCT_NAMES = [
@@ -293,32 +261,33 @@ TELECOM_PRODUCT_NAMES = [
     "portabilite","profix","prolongation de validite","rapido pro",
     "recharge","roaming","saff","sajalni","select plus","smart energy",
     "smart freeze","smart lights","smart roaming","sms appel manque",
-    "sms joignabilite","sms plus","sos bip","sos solde","suivi conso",
-    "tabba3ni","tfadhal","trankil","transfert d appel","transfert internet",
-    "tt presse","tunisie telecom","ussd","vpn international","vpn national",
+    "sms joignabilite","sms plus","sos bip","sos solde","souscription",
+    "suivi conso","tabba3ni","tfadhal","trankil","transfert d appel",
+    "transfert internet","tt presse","tunisie telecom","ussd",
+    "validite","vas","vert","vocale","vpn international","vpn national",
     "waffi",
 ]
 
+# [FIX-v1.6] PROMPT_LEAKS allege — seulement les vrais leaks
 PROMPT_LEAKS_PHI = [
-    "selon mes connaissances","d'après mes données","je sais que",
-    "en général","typiquement","habituellement","il est courant",
-    "la plupart des opérateurs","généralement","dans la plupart des cas",
-    "وفقاً لمعرفتي","بحسب معلوماتي","عادةً ما","في معظم الحالات",
+    "as an ai","as a language model",
+    "je suis un assistant ia","en tant qu'ia",
+    "\u0648\u0641\u0642\u0627\u064b \u0644\u0645\u0639\u0631\u0641\u062a\u064a","\u0628\u062d\u0633\u0628 \u0645\u0639\u0644\u0648\u0645\u0627\u062a\u064a",
 ]
 
 HALLUCINATION_SIGNALS = ["ooredoo","myoredoo","orange tunisie","tunisiana","vodafone"]
-GENERATION_NOISE      = ["casino","tirage au sort","el jem","karting","festival"]
+GENERATION_NOISE      = ["casino","karting"]
 
 _MULTILINE_KEYWORDS = [
     "inscrire","inscription","souscrire","souscription","activer","activation",
     "acceder","acces","telecharger","telechargement","comment","etapes",
     "possibilites","plusieurs","manieres","facons",
-    "كيفية","خطوات","طريقة","كيف","تفعيل","اشتراك","تسجيل",
+    "\u0643\u064a\u0641\u064a\u0629","\u062e\u0637\u0648\u0627\u062a","\u0637\u0631\u064a\u0642\u0629","\u0643\u064a\u0641","\u062a\u0641\u0639\u064a\u0644","\u0627\u0634\u062a\u0631\u0627\u0643","\u062a\u0633\u062c\u064a\u0644",
 ]
 
 BRUIT_DEBUT_PHRASE = [
     "Marketing","Contexte","Description","Concept","Source",
-    "Flash","DCCM","Cible","Segment","Rappelons",
+    "Flash","DCCM","Cible","Segment","Rappelons","DOCUMENT","Direction",
 ]
 
 _NOISE_PATTERNS = [
@@ -330,27 +299,31 @@ _NOISE_PATTERNS = [
     r"Cible\s*:?\s*Toute la clientele\s*(de\s*)?Tunisie Telecom",
     r"Direction (?:Marketing|VAS|Commerciale|Reseau).*",
     r"Strictement confidentiel.*",
+    r"DOCUMENT DE TRAVAIL.*",
+    r"Date de lancement\s*:?\s*\d{2}/\d{2}/\d{4}",
+    r"This information is confidential.*",
+    r"/\d{4}\s+(?:DCACM|DMFI|DM|DC)\s*/.*",
 ]
 
 _JSONL_ARTIFACTS = [
     (r'\bavec\s+est\b',                     'est'),
     (r'\best\s+de\s+de\b',                  'est de'),
     (r'\bde\s+de\b',                        'de'),
-    (r'voici\s+la\s+r[eé]ponse\s+de\s+Tunisie\s+Telecom\s*:\s*', ''),
+    (r'voici\s+la\s+r[ee]ponse\s+de\s+Tunisie\s+Telecom\s*:\s*', ''),
     (r'\s{2,}',                             ' '),
 ]
 
 TELECOM_THEME_KEYWORDS = {
     "Hayya":     ["hayya"],
-    "Roaming":   ["roaming","itinerance","international","etranger","تجوال"],
-    "Internet":  ["internet","data","go","mo","4g","5g","debit","connexion","انترنت","بيانات"],
+    "Roaming":   ["roaming","itinerance","international","etranger","\u062a\u062c\u0648\u0627\u0644"],
+    "Internet":  ["internet","data","go","mo","4g","5g","debit","connexion","\u0627\u0646\u062a\u0631\u0646\u062a","\u0628\u064a\u0627\u0646\u0627\u062a"],
     "NetBox":    ["netbox","net box"],
     "ADSL/Fixe": ["adsl","vdsl","fixe","fibre","elissa","box"],
-    "Forfait":   ["forfait","pack","abonnement","souscrire","offre","باقة","اشتراك","عرض"],
-    "Recharge":  ["recharge","solde","credit","sos","122","balance","شحن","رصيد"],
-    "Mobile":    ["mobile","sim","esim","numero","telephone","هاتف","موبايل","رقم"],
-    "Activation":["activer","activation","desactiver","ussd","code","تفعيل"],
-    "Facture":   ["facture","payer","paiement","frais","فاتورة"],
+    "Forfait":   ["forfait","pack","abonnement","souscrire","offre","\u0628\u0627\u0642\u0629","\u0627\u0634\u062a\u0631\u0627\u0643","\u0639\u0631\u0636"],
+    "Recharge":  ["recharge","solde","credit","sos","122","balance","\u0634\u062d\u0646","\u0631\u0635\u064a\u062f"],
+    "Mobile":    ["mobile","sim","esim","numero","telephone","\u0647\u0627\u062a\u0641","\u0645\u0648\u0628\u0627\u064a\u0644","\u0631\u0642\u0645"],
+    "Activation":["activer","activation","desactiver","ussd","code","\u062a\u0641\u0639\u064a\u0644"],
+    "Facture":   ["facture","payer","paiement","frais","\u0641\u0627\u062a\u0648\u0631\u0629"],
     "Corporate": ["corporate","entreprise","b2b","professionnel"],
 }
 
@@ -374,9 +347,18 @@ CORRECTIONS_DIRECTES = {
     "netboc":"netbox","netbok":"netbox",
 }
 
+_TELECOM_VALID_WORDS = {
+    "tunisie","telecom","clients","client","offre","service","services",
+    "forfait","internet","mobile","reseau","disponible","activer",
+    "souscrire","abonnement","recharge","solde","appel","sms","data",
+    "go","mo","dt","dinar","mois","jours","gratuit","illimite",
+    "tarif","prix","cout","numero","code","ussd","fibre","adsl",
+    "netbox","roaming","international","pack","option","bonus",
+}
+
 
 # ─────────────────────────────────────────────────────────────
-# CACHE SÉMANTIQUE LRU
+# CACHE SEMANTIQUE LRU
 # ─────────────────────────────────────────────────────────────
 class SemanticCache:
     def __init__(self, maxsize: int = 256):
@@ -453,7 +435,7 @@ def detect_theme(question: str) -> str:
 
 def detect_language(text: str) -> str:
     arabic_chars  = len(re.findall(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]', text))
-    latin_chars   = len(re.findall(r'[a-zA-ZÀ-ÿ]', text))
+    latin_chars   = len(re.findall(r'[a-zA-Z\u00C0-\u00FF]', text))
     other_scripts = len(re.findall(r'[\u0400-\u04FF\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]', text))
     total = arabic_chars + latin_chars + other_scripts
 
@@ -489,8 +471,7 @@ def detect_language(text: str) -> str:
 
 def is_greeting(query: str) -> bool:
     q = query.strip()
-    q_ar = q.strip()
-    if len(q_ar) <= 60 and any(g in q_ar for g in GREETINGS_AR):
+    if len(q) <= 60 and any(g in q for g in GREETINGS_AR):
         return True
     q_lower = q.lower().strip()
     return len(q_lower) <= 40 and any(g in q_lower for g in GREETINGS_FR)
@@ -540,15 +521,9 @@ def clean_jsonl_artifacts(text: str) -> str:
     for pattern, replacement in _JSONL_ARTIFACTS:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     text = text.strip()
-    if text and text[-1] not in '.!?؟':
+    if text and text[-1] not in '.!?\u061f':
         text = text.rstrip(',;:') + '.'
     return text
-
-def enrich_query_with_history(query: str, history: List[dict], window: int = RAG_HISTORY_WINDOW) -> str:
-    if not history or window == 0:
-        return query
-    user_msgs = [h["content"] for h in history if h["role"] == "user"][-window:]
-    return f"{' '.join(user_msgs)} {query}".strip() if user_msgs else query
 
 def get_fallback(lang: str) -> str:
     return FALLBACK_NO_INFO_AR if lang == 'ar' else FALLBACK_NO_INFO_FR
@@ -559,16 +534,27 @@ def get_hors_sujet(lang: str) -> str:
 def get_greeting_response(lang: str) -> str:
     return GREETING_RESPONSE_AR if lang == 'ar' else GREETING_RESPONSE_FR
 
+def _get_free_vram_gb() -> float:
+    if not torch.cuda.is_available():
+        return 0.0
+    try:
+        total = torch.cuda.get_device_properties(0).total_memory
+        used  = torch.cuda.memory_allocated(0)
+        return (total - used) / 1e9
+    except Exception:
+        return 0.0
+
 
 # ─────────────────────────────────────────────────────────────
-# GESTIONNAIRE MODÈLE — fp16 SANS bitsandbytes, eager attn
+# GESTIONNAIRE MODELE
 # ─────────────────────────────────────────────────────────────
 class Phi35ModelManager:
     def __init__(self):
-        self._model     = None
-        self._tokenizer = None
-        self._lock      = threading.RLock()
-        self._loaded    = False
+        self._model      = None
+        self._tokenizer  = None
+        self._lock       = threading.RLock()
+        self._loaded     = False
+        self._quant_mode = "unknown"
 
     def load(self):
         if self._loaded:
@@ -578,12 +564,12 @@ class Phi35ModelManager:
         if not torch.cuda.is_available():
             raise SystemExit("CUDA non disponible.")
 
-        name = torch.cuda.get_device_name(0)
-        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        name  = torch.cuda.get_device_name(0)
+        vram  = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info("[GPU] %s | VRAM: %.1f GB", name, vram)
 
-        model_path = MODEL_DIR if os.path.isdir(MODEL_DIR) else BASE_MODEL
-        logger.info("[MODEL] Chargement Phi-3.5 fp16 : %s", model_path)
+        model_path = MODEL_DIR
+        logger.info("[MODEL] Chargement Phi-3.5 : %s", model_path)
         t0 = time.time()
 
         self._tokenizer = AutoTokenizer.from_pretrained(
@@ -594,30 +580,67 @@ class Phi35ModelManager:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        logger.info("[MODEL] fp16 + attn=eager (RTX 2070 Turing)")
+        if USE_4BIT:
+            logger.info("[MODEL] Mode 4-bit NF4 active")
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+                self._model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    quantization_config=bnb_config,
+                    device_map={"": "cuda:0"},
+                    trust_remote_code=True,
+                    attn_implementation="eager",
+                )
+                self._quant_mode = "4bit_nf4"
+                logger.info("[MODEL] Charge en 4-bit NF4")
+            except ImportError:
+                logger.warning("[MODEL] bitsandbytes non installe -> fallback fp16")
+                self._load_fp16(model_path)
+            except Exception as e:
+                logger.warning("[MODEL] Erreur 4-bit (%s) -> fallback fp16", e)
+                self._load_fp16(model_path)
+        else:
+            logger.info("[MODEL] Mode fp16")
+            self._load_fp16(model_path)
+
+        self._model.eval()
+        self._model.config.use_cache = True
+
+        if TORCH_COMPILE_PHI and hasattr(torch, "compile"):
+            try:
+                self._model = torch.compile(self._model, mode="reduce-overhead", fullgraph=False)
+                logger.info("[MODEL] torch.compile active")
+            except Exception as e:
+                logger.warning("[MODEL] torch.compile non disponible : %s", e)
+
+        self._warmup()
+
+        elapsed   = time.time() - t0
+        vram_used = torch.cuda.memory_allocated(0) / 1e9
+        vram_free = _get_free_vram_gb()
+        logger.info(
+            "[MODEL] Pret en %.1fs | quant=%s | VRAM utilisee: %.2f GB | libre: %.2f GB",
+            elapsed, self._quant_mode, vram_used, vram_free
+        )
+        self._loaded = True
+
+    def _load_fp16(self, model_path: str):
+        from transformers import AutoModelForCausalLM
         self._model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
             device_map={"": "cuda:0"},
             trust_remote_code=True,
             attn_implementation="eager",
-            low_cpu_mem_usage=False,
+            low_cpu_mem_usage=True,
         )
-        self._model.eval()
-        self._model.config.use_cache = True
-
-        if hasattr(torch, "compile"):
-            try:
-                self._model = torch.compile(self._model, mode="reduce-overhead", fullgraph=False)
-                logger.info("[MODEL] torch.compile(reduce-overhead) activé")
-            except Exception as e:
-                logger.info("[MODEL] torch.compile non disponible : %s", e)
-
-        self._warmup()
-        elapsed   = time.time() - t0
-        vram_used = torch.cuda.memory_allocated(0) / 1e9
-        logger.info("[MODEL] Prêt en %.1fs — VRAM: %.1f/%.1f GB", elapsed, vram_used, vram)
-        self._loaded = True
+        self._quant_mode = "fp16"
 
     def _warmup(self):
         logger.info("[MODEL] Warmup...")
@@ -629,17 +652,22 @@ class Phi35ModelManager:
                         **dummy, max_new_tokens=5, do_sample=False,
                         pad_token_id=self._tokenizer.eos_token_id,
                     )
-            logger.info("[MODEL] Warmup OK (2 passes)")
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info("[MODEL] Warmup OK")
         except Exception as e:
-            logger.warning("[MODEL] Warmup échoué : %s", e)
+            logger.warning("[MODEL] Warmup echoue : %s", e)
 
     def get(self):
         if not self._loaded:
-            raise RuntimeError("Modèle non chargé.")
+            raise RuntimeError("Modele non charge.")
         return self._model, self._tokenizer
 
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def quant_mode(self) -> str:
+        return self._quant_mode
 
 _gen_manager = Phi35ModelManager()
 
@@ -647,9 +675,38 @@ _gen_manager = Phi35ModelManager()
 # ─────────────────────────────────────────────────────────────
 # CONTEXTE RAG
 # ─────────────────────────────────────────────────────────────
+def _clean_chunk_for_context(text: str) -> str:
+    text = clean_chunk(text)
+    lines = text.split('\n')
+    clean_lines = []
+    for line in lines:
+        line = line.strip()
+        if len(line) < 15:
+            continue
+        if any(line.startswith(b) for b in BRUIT_DEBUT_PHRASE):
+            continue
+        if re.match(r'^[\d\s.,|DT%GoMo-]+$', line):
+            continue
+        clean_lines.append(line)
+    return ' '.join(clean_lines).strip()
+
+
+def _build_rag_context(chunks: List[dict], is_multiline: bool = False) -> str:
+    max_chars = RAG_CONTEXT_CHARS_MULTILINE if is_multiline else RAG_CONTEXT_CHARS_SIMPLE
+    parts = []
+    for chunk in chunks[:3]:
+        cleaned = _clean_chunk_for_context(chunk["text"])
+        if cleaned and len(cleaned) > 20:
+            parts.append(cleaned[:max_chars])
+    context = " | ".join(parts)
+    logger.info("[CTX] %d chars | chunks=%d | '%s'...",
+                len(context), len(chunks), context[:120])
+    return context
+
+
 def _extract_answer_from_chunk(text: str) -> str:
-    idx = text.find('?')
-    idx_ar = text.find('؟')
+    idx    = text.find('?')
+    idx_ar = text.find('\u061f')
     candidates = [i for i in [idx, idx_ar] if i != -1]
     if candidates:
         best = min(candidates)
@@ -659,24 +716,9 @@ def _extract_answer_from_chunk(text: str) -> str:
                 return clean_jsonl_artifacts(after)
     return clean_jsonl_artifacts(text)
 
-# [FIX-3] Contexte RAG élargi : 550/700 → 900/1200 chars, 2 → 3 chunks
-# Un contexte trop court oblige Phi à générer des mots hors-contexte,
-# ce qui fait échouer la vérification MIN_CONTEXT_COVERAGE.
-def _build_rag_context(chunks: List[dict], is_multiline: bool = False) -> str:
-    max_chars = 1200 if is_multiline else 900
-    parts = []
-    for chunk in chunks[:3]:
-        cleaned = clean_chunk(chunk["text"])
-        answer  = _extract_answer_from_chunk(cleaned)
-        if answer and len(answer) > 10:
-            parts.append(answer[:max_chars])
-    context = " | ".join(parts)
-    logger.info("[CTX] %d chars : '%s'", len(context), context[:100])
-    return context
-
 
 # ─────────────────────────────────────────────────────────────
-# VALIDATION POST-GÉNÉRATION — [FIX-2] assouplie
+# VALIDATION POST-GENERATION
 # ─────────────────────────────────────────────────────────────
 def _token_overlap(text1: str, text2: str) -> float:
     w1 = set(normalize_query(text1.lower()).split())
@@ -684,26 +726,14 @@ def _token_overlap(text1: str, text2: str) -> float:
     if not w1 or not w2: return 0.0
     return len(w1 & w2) / max(len(w1), len(w2))
 
+
 def _validate_phi_response(
     response: str,
     query: str,
     context: str,
-    chunks: List[dict] = None       # [FIX-2] paramètre ajouté
+    chunks: List[dict] = None,
+    attempt: int = 1,
 ) -> tuple:
-    """
-    Valide la réponse générée par Phi-3.5.
-
-    [FIX-2] Changements par rapport à v1.1 :
-    - Seuil overlap copie : 0.85 → 0.92
-      Les chunks PDF contiennent souvent les mêmes phrases clés que les
-      réponses légitimes, ce qui faussait la détection de "copie".
-    - Contexte étendu aux chunks RAW pour le calcul de coverage :
-      Le contexte nettoyé (250-550 chars) ne contenait qu'une fraction
-      des mots du chunk original. La réponse utilisait des synonymes ou
-      reformulations présents dans le chunk RAW mais absents du contexte
-      nettoyé → coverage artificellement bas → rejet systématique.
-    - MIN_CONTEXT_COVERAGE abaissé à 0.10 (défini en CONFIG ci-dessus).
-    """
     if len(response.strip()) < 10:
         return False, "trop_court"
 
@@ -721,39 +751,36 @@ def _validate_phi_response(
     if any(n in response.lower() for n in GENERATION_NOISE):
         return False, "bruit"
 
-    # [FIX-2] Seuil overlap relevé : 0.85 → 0.92
     overlap = _token_overlap(response, context)
-    if overlap > 0.92 and len(response) > 80:
+    if overlap > 0.97 and len(response) > 150:
         return False, f"copie_contexte_{overlap:.2f}"
 
-    # [FIX-2] Contexte étendu aux chunks RAW pour coverage
-    # On part du contexte nettoyé fourni au prompt, puis on y ajoute
-    # le texte brut de chaque chunk pour élargir le vocabulaire de référence.
     extended_context = context
     if chunks:
         for c in chunks[:3]:
             extended_context += " " + c.get("text", "")
 
     context_words  = set(normalize_query(extended_context.lower()).split())
-    response_words = [w for w in normalize_query(response.lower()).split() if len(w) > 4]
+    response_words = [
+        w for w in normalize_query(response.lower()).split()
+        if len(w) > 4 and w not in _TELECOM_VALID_WORDS
+    ]
 
     if response_words:
         coverage = sum(1 for w in response_words if w in context_words) / len(response_words)
-        if coverage < MIN_CONTEXT_COVERAGE:   # [FIX-1] maintenant 0.10
+        if coverage < MIN_CONTEXT_COVERAGE:
+            logger.debug(
+                "[VALID-DEBUG] couverture=%.3f | reponse='%s'...",
+                coverage, response[:80]
+            )
             return False, f"couverture_faible_{coverage:.2f}"
 
     return True, "ok"
 
 
 # ─────────────────────────────────────────────────────────────
-# GÉNÉRATION PHI-3.5 — [FIX-2][FIX-4][FIX-5]
+# REPONSE EXTRACTIVE (fallback)
 # ─────────────────────────────────────────────────────────────
-def _clean_phi_output(text: str) -> str:
-    text = re.sub(r"<\|.*?\|>", "", text).strip()
-    text = re.sub(r"^(?:assistant|Assistant)\s*:\s*", "", text).strip()
-    text = re.sub(r'\s*\.\.\.\s*$', '.', text).strip()
-    return clean_jsonl_artifacts(text)
-
 def build_extractive_answer(chunks: List[dict], query: str, lang: str = 'fr') -> str:
     if not chunks:
         return get_fallback(lang)
@@ -764,10 +791,10 @@ def build_extractive_answer(chunks: List[dict], query: str, lang: str = 'fr') ->
     for chunk in chunks:
         raw       = clean_chunk(chunk["text"])
         ans_part  = _extract_answer_from_chunk(raw)
-        sentences = [s.strip() for s in re.split(r'[.!?؟;]\s+|\n', ans_part) if len(s.strip()) > 25]
+        sentences = [s.strip() for s in re.split(r'[.!?\u061f;]\s+|\n', ans_part) if len(s.strip()) > 25]
         bonus_kw  = [
             "tarif","prix","dt","offre","activation","forfait","go","mo",
-            "minute","mois","gratuit","تعريفة","عرض","تفعيل","باقة","مجاني"
+            "minute","mois","gratuit","\u062a\u0639\u0631\u064a\u0641\u0629","\u0639\u0631\u0636","\u062a\u0641\u0639\u064a\u0644","\u0628\u0627\u0642\u0629","\u0645\u062c\u0627\u0646\u064a"
         ]
         scored = []
         for s in sentences:
@@ -782,31 +809,88 @@ def build_extractive_answer(chunks: List[dict], query: str, lang: str = 'fr') ->
         return get_fallback(lang)
     best = all_sentences[0]
     if len(best) > 300:
-        best = re.split(r'(?<=[.!?؟])\s+', best[:350])[0]
+        best = re.split(r'(?<=[.!?\u061f])\s+', best[:350])[0]
     return clean_jsonl_artifacts(best)
 
-def _generate_sync(question: str, chunks: List[dict], lang: str = 'fr') -> tuple:
-    """
-    Génération Phi-3.5 avec timeout, validation et verrou CUDA.
 
-    [FIX-2] chunks transmis à _validate_phi_response pour coverage étendu
-    [FIX-4] _cuda_generation_lock protège l'appel model.generate
-    [FIX-5] logging détaillé du motif de rejet
-    """
+# ─────────────────────────────────────────────────────────────
+# [FIX-v1.6] NETTOYAGE OUTPUT — supprime fragments question et "Response:"
+# ─────────────────────────────────────────────────────────────
+def _clean_phi_output(text: str) -> str:
+    # Supprime les tokens speciaux
+    text = re.sub(r"<\|.*?\|>", "", text).strip()
+    # Supprime "assistant:" en debut
+    text = re.sub(r"^(?:assistant|Assistant)\s*:\s*", "", text).strip()
+    # Supprime "Response:" / "Reponse:" en debut
+    text = re.sub(r"^(?:Response|Reponse|Reponds|Answer|Repondre)\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+    # Supprime les fragments de question avant la reponse (pattern: "...? Response: ...")
+    # Detecte si le texte commence par un fragment de question
+    match = re.match(r"^[^.!?\u061f]{0,120}[?\u061f]\s*(?:Response|Reponse)?\s*:?\s*", text, flags=re.DOTALL)
+    if match and match.end() < len(text) * 0.6:
+        text = text[match.end():].strip()
+    # Supprime "..." en fin
+    text = re.sub(r'\s*\.\.\.\s*$', '.', text).strip()
+    return clean_jsonl_artifacts(text)
+
+
+# ─────────────────────────────────────────────────────────────
+# GENERATION PHI-3.5 AVEC RETRY
+# ─────────────────────────────────────────────────────────────
+def _run_single_generation(
+    model, tokenizer, messages: list,
+    max_new_tokens: int,
+    do_sample: bool = False,
+    temperature: float = 0.1,
+) -> tuple:
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+    )
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=MAX_INPUT_LENGTH,
+    ).to("cuda:0")
+
+    n_input_tokens = inputs["input_ids"].shape[-1]
+    logger.info("[GEN-PHI] Tokens input : %d / max %d", n_input_tokens, MAX_INPUT_LENGTH)
+
+    # [FIX-v1.6] Ne pas passer temperature quand do_sample=False (evite warning)
+    gen_kwargs = dict(
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        repetition_penalty=REPETITION_PENALTY,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        use_cache=True,
+        min_new_tokens=5,
+    )
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+
+    t_start = time.time()
+    with _cuda_generation_lock:
+        with torch.no_grad():
+            output_ids = model.generate(**gen_kwargs)
+    elapsed    = time.time() - t_start
+    new_tokens = output_ids[0][n_input_tokens:]
+    n_new      = len(new_tokens)
+    raw_answer = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    return raw_answer, n_new, elapsed
+
+
+def _generate_sync(question: str, chunks: List[dict], lang: str = 'fr') -> tuple:
     is_multiline = _is_multiline_query(question)
 
     if lang == 'ar':
         sys_prompt  = GENERATIVE_SYSTEM_PROMPT_AR_MULTILINE if is_multiline else GENERATIVE_SYSTEM_PROMPT_AR
-        instruction = ("لخّص الخطوات المتاحة في 3 إلى 6 جمل."
-                       if is_multiline
-                       else "أجب في جملة أو جملتين قصيرتين ومباشرتين.")
+        instruction = "Reponds en 2-3 phrases en arabe en te basant UNIQUEMENT sur le contexte."
     else:
         sys_prompt  = GENERATIVE_SYSTEM_PROMPT_MULTILINE if is_multiline else GENERATIVE_SYSTEM_PROMPT
-        instruction = ("Résume en 3 à 6 phrases les étapes disponibles."
-                       if is_multiline
-                       else "Réponds en une à deux phrases courtes et directes.")
+        instruction = "Reponds en 2-3 phrases en francais en te basant UNIQUEMENT sur le contexte."
 
-    # [FIX-3] Contexte élargi
     context = _build_rag_context(chunks, is_multiline=is_multiline)
 
     messages = [
@@ -814,83 +898,119 @@ def _generate_sync(question: str, chunks: List[dict], lang: str = 'fr') -> tuple
         {
             "role": "user",
             "content": (
-                f"Contexte Tunisie Telecom :\n{context}\n\n"
-                f"Question : {question}\n\n{instruction}"
+                f"CONTEXT:\n{context}\n\n"
+                f"QUESTION: {question}\n\n"
+                f"{instruction}"
             )
         },
     ]
 
-    t_start = time.time()
+    if not _gen_manager.is_loaded():
+        logger.error("[GEN-PHI] Modele non charge -> extractif")
+        return build_extractive_answer(chunks, question, lang), "extractive_fallback"
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        free_vram = _get_free_vram_gb()
+        logger.info("[GEN-PHI] VRAM libre : %.2f GB (mode=%s)", free_vram, _gen_manager.quant_mode())
+        if free_vram < MIN_FREE_VRAM_GB:
+            logger.warning("[GEN-PHI] VRAM insuffisante -> extractif")
+            with _metrics_lock:
+                _global_metrics["generative_vram_skip"] += 1
+            return build_extractive_answer(chunks, question, lang), "extractive_oom"
+
     try:
         model, tokenizer = _gen_manager.get()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
-        inputs = tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=1536,
-        ).to("cuda:0")
+        last_reason = "unknown"
+        # tentative 1 : greedy, tentative 2 : sampling
+        configs = [(False, 0.1), (True, 0.3)]
 
-        # [FIX-4] Verrou CUDA pour éviter les crashs sur requêtes concurrentes
-        with _cuda_generation_lock:
-            with torch.no_grad():
-                output_ids = model.generate(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
+        for attempt in range(1, GEN_MAX_RETRIES + 1):
+            do_sample, temp = configs[min(attempt - 1, len(configs) - 1)]
+            logger.info("[GEN-PHI] Tentative %d/%d | do_sample=%s", attempt, GEN_MAX_RETRIES, do_sample)
+
+            try:
+                raw_answer, n_new_tokens, elapsed = _run_single_generation(
+                    model, tokenizer, messages,
                     max_new_tokens=MAX_NEW_TOKENS,
-                    temperature=TEMPERATURE,
-                    do_sample=DO_SAMPLE,
-                    repetition_penalty=REPETITION_PENALTY,
-                    pad_token_id=tokenizer.eos_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
-                    min_new_tokens=5,
+                    do_sample=do_sample,
+                    temperature=temp,
                 )
+            except torch.cuda.OutOfMemoryError:
+                logger.error("[GEN-PHI] OOM tentative %d", attempt)
+                torch.cuda.empty_cache()
+                gc.collect()
+                with _metrics_lock:
+                    _global_metrics["generative_error_oom"] += 1
+                break
 
-        elapsed = time.time() - t_start
+            if elapsed > GEN_TIMEOUT_S:
+                logger.warning("[GEN-PHI] Timeout (%.1fs) tentative %d", elapsed, attempt)
+                with _metrics_lock:
+                    _global_metrics["generative_timeout_count"] += 1
+                break
 
-        if elapsed > GEN_TIMEOUT_S:
-            logger.warning("[GEN-PHI] Timeout (%.1fs) → fallback extractif", elapsed)
-            with _metrics_lock:
-                _global_metrics["generative_timeout_count"] += 1
-            return build_extractive_answer(chunks, question, lang), "extractive_timeout"
-
-        new_tokens = output_ids[0][inputs["input_ids"].shape[-1]:]
-        raw_answer = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-        response   = _clean_phi_output(raw_answer)
-
-        sentences = re.split(r'(?<=[.!?؟])\s+', response)
-        if len(sentences) > 6:
-            response = " ".join(sentences[:6])
-
-        logger.info("[GEN-PHI] %.2fs : '%s'", elapsed, response[:120])
-
-        # [FIX-2] chunks passés pour validation avec contexte étendu
-        # [FIX-5] logging détaillé du motif de rejet
-        valid, reason = _validate_phi_response(response, question, context, chunks=chunks)
-        if not valid:
-            logger.warning(
-                "[GEN-PHI] Rejeté (%s) → extractif | réponse='%s'",
-                reason, response[:80]
+            response = _clean_phi_output(raw_answer)
+            logger.info(
+                "[GEN-PHI] Tentative %d — %.2fs | %d tokens | '%s'...",
+                attempt, elapsed, n_new_tokens, response[:150]
             )
-            with _metrics_lock:
-                _global_metrics["validation_rejected_count"] += 1
-                _global_metrics["extractive_count"]          += 1
-                # [FIX-5] Comptage détaillé par raison
-                _global_metrics["validation_rejection_reasons"][reason] += 1
-            return build_extractive_answer(chunks, question, lang), "extractive_validation"
 
-        return response, "generative"
+            sentences = re.split(r'(?<=[.!?\u061f])\s+', response)
+            if len(sentences) > 6:
+                response = " ".join(sentences[:6])
 
-    except torch.cuda.OutOfMemoryError:
-        logger.error("[GEN-PHI] OOM CUDA → extractif")
-        torch.cuda.empty_cache()
-        return build_extractive_answer(chunks, question, lang), "extractive_oom"
+            valid, reason = _validate_phi_response(
+                response, question, context, chunks=chunks, attempt=attempt
+            )
+
+            if valid:
+                if attempt > 1:
+                    logger.info("[GEN-PHI] Succes au retry (tentative %d)", attempt)
+                    with _metrics_lock:
+                        _global_metrics["generative_retry_success"] += 1
+                with _metrics_lock:
+                    _global_metrics["generative_count"] += 1
+                logger.info("[GEN-PHI] Reponse generee tentative=%d | %.2fs", attempt, elapsed)
+                return response, "generative"
+            else:
+                last_reason = reason
+                logger.warning(
+                    "[GEN-PHI] Rejet tentative %d — raison='%s' | reponse='%s'...",
+                    attempt, reason, response[:100]
+                )
+                with _metrics_lock:
+                    _global_metrics["validation_rejected_count"] += 1
+                    _global_metrics["validation_rejection_reasons"][reason] += 1
+
+        logger.warning("[GEN-PHI] %d tentative(s) echouee(s) — raison='%s' -> extractif",
+                       GEN_MAX_RETRIES, last_reason)
+        with _metrics_lock:
+            _global_metrics["generative_retry_fail"] += 1
+            _global_metrics["extractive_count"]       += 1
+        return build_extractive_answer(chunks, question, lang), "extractive_validation"
+
+    except RuntimeError as e:
+        logger.error("[GEN-PHI] RuntimeError : %s\n%s", e, traceback.format_exc())
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
+        with _metrics_lock:
+            _global_metrics["generative_error_runtime"] += 1
+            _global_metrics["extractive_count"]         += 1
+        return build_extractive_answer(chunks, question, lang), "extractive_runtime_error"
+
     except Exception as e:
-        logger.error("[GEN-PHI] Erreur : %s → extractif", e)
+        logger.error("[GEN-PHI] Exception inattendue :\n%s", traceback.format_exc())
+        with _metrics_lock:
+            _global_metrics["generative_error_other"] += 1
+            _global_metrics["extractive_count"]       += 1
         return build_extractive_answer(chunks, question, lang), "extractive_fallback"
+
 
 async def generate_answer(question: str, chunks: List[dict], lang: str = 'fr') -> tuple:
     return await asyncio.to_thread(_generate_sync, question, chunks, lang)
@@ -949,9 +1069,9 @@ def rag_search(query: str, top_k: int = TOP_K) -> List[dict]:
     return sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 
 def rag_search_best(query_original: str, query_processed: str, top_k: int = TOP_K) -> List[dict]:
-    hits1 = rag_search(query_original, top_k)
+    hits1      = rag_search(query_original, top_k)
     similarity = fuzz.ratio(query_original.lower(), query_processed)
-    hits2 = rag_search(query_processed, top_k) if similarity < 85 else []
+    hits2      = rag_search(query_processed, top_k) if similarity < 85 else []
     seen = {}
     for h in hits1 + hits2:
         if h["text"] not in seen or h["score"] > seen[h["text"]]["score"]:
@@ -1031,7 +1151,7 @@ def init_db():
         ]:
             try: conn.execute(sql)
             except Exception: pass
-    logger.info("DB initialisée : %s", DB_PATH)
+    logger.info("DB initialisee : %s", DB_PATH)
 
 def save_message(sid, role, content):
     with _db_lock:
@@ -1103,38 +1223,44 @@ class RagEntryRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
-# FASTAPI
+# FASTAPI — lifespan
 # ─────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("=" * 60)
-    logger.info("  Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.2")
-    logger.info("  fp16 direct | eager attn | sans bitsandbytes")
-    logger.info("  [FIX-1] MIN_CONTEXT_COVERAGE=%.2f", MIN_CONTEXT_COVERAGE)
-    logger.info("  [FIX-3] RAG context chars: %d/%d", 900, 1200)
-    logger.info("  [FIX-4] CUDA lock activé")
-    logger.info("  ChromaDB : %s / collection : %s", CHROMA_DB_DIR, COLLECTION_NAME)
-    logger.info("  Modèle   : %s", MODEL_DIR)
-    logger.info("  DB       : %s", DB_PATH)
-    logger.info("  Port     : %d", API_PORT)
+    logger.info("  Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.6")
+    logger.info("  MODEL_DIR=%s", MODEL_DIR)
+    logger.info("  USE_4BIT=%s | MAX_INPUT_LENGTH=%d", USE_4BIT, MAX_INPUT_LENGTH)
+    logger.info("  RAG_CTX=%d/%d | GEN_MAX_RETRIES=%d",
+                RAG_CONTEXT_CHARS_SIMPLE, RAG_CONTEXT_CHARS_MULTILINE, GEN_MAX_RETRIES)
     logger.info("=" * 60)
     init_db()
     init_auth_db()
     init_rag()
     _semantic_cache.clear()
-    logger.info("[STARTUP] Chargement Phi-3.5 fp16 (~7.6GB VRAM)...")
-    _gen_manager.load()
-    logger.info("[STARTUP] API opérationnelle")
+
+    logger.info("[STARTUP] Chargement Phi-3.5...")
+    try:
+        _gen_manager.load()
+        logger.info("[STARTUP] Modele charge (mode=%s)", _gen_manager.quant_mode())
+        if torch.cuda.is_available():
+            vram_used  = torch.cuda.memory_allocated(0) / 1e9
+            vram_free  = _get_free_vram_gb()
+            vram_total = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.info(
+                "[STARTUP] VRAM : utilisee=%.2f GB | libre=%.2f GB | total=%.1f GB",
+                vram_used, vram_free, vram_total
+            )
+    except Exception as e:
+        logger.error("[STARTUP] ECHEC chargement : %s", e)
+    logger.info("[STARTUP] API operationnelle — v1.6")
     yield
-    logger.info("API arrêtée")
+    logger.info("API arretee")
 
 app = FastAPI(
-    title="Chatbot Tunisie Telecom — Phi-3.5 v1.2",
-    description=(
-        "RAG + Phi-3.5-mini-instruct fp16 | Bilingue FR/AR | "
-        "Correctifs mode génératif v1.2"
-    ),
-    version="1.2.0",
+    title="Chatbot Tunisie Telecom — Phi-3.5 v1.6",
+    description="RAG + Phi-3.5-mini-instruct 4-bit NF4 | Mode generatif | FR/AR",
+    version="1.6.0",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -1177,7 +1303,7 @@ async def check_email(req: CheckEmailRequest):
 
 
 # ─────────────────────────────────────────────────────────────
-# ROUTE CHAT — pipeline bilingue FR/AR
+# ROUTE CHAT
 # ─────────────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(request: ChatRequest):
@@ -1189,9 +1315,8 @@ async def chat(request: ChatRequest):
     if not query:
         raise HTTPException(400, "Message vide.")
 
-    # ── 0. Détection de langue ───────────────────────────────
     lang = detect_language(query)
-    logger.info("[LANG] détectée=%s | query='%s'", lang, query[:60])
+    logger.info("[LANG] detectee=%s | query='%s'", lang, query[:60])
 
     if lang == 'other':
         answer  = LANG_NOT_SUPPORTED_MSG
@@ -1211,7 +1336,6 @@ async def chat(request: ChatRequest):
         with _metrics_lock:
             _global_metrics["arabic_query_count"] += 1
 
-    # ── 1. Salutation ────────────────────────────────────────
     if is_greeting(query):
         answer  = get_greeting_response(lang)
         elapsed = int((time.time() - t0) * 1000)
@@ -1225,7 +1349,6 @@ async def chat(request: ChatRequest):
             is_telecom=True, rag_used=False, confidence=1.0,
             response_time_ms=elapsed, mode="greeting", lang=lang)
 
-    # ── 2. Hors sujet ────────────────────────────────────────
     if not is_telecom_related(query):
         log_unanswered(session_id, query, "hors_sujet", is_telecom=False)
         answer  = get_hors_sujet(lang)
@@ -1240,7 +1363,6 @@ async def chat(request: ChatRequest):
             is_telecom=False, rag_used=False, confidence=0.0,
             response_time_ms=elapsed, mode="hors_sujet", lang=lang)
 
-    # ── 3. Cache sémantique ──────────────────────────────────
     cached = _semantic_cache.get(query)
     if cached:
         elapsed = int((time.time() - t0) * 1000)
@@ -1256,34 +1378,18 @@ async def chat(request: ChatRequest):
             response_time_ms=elapsed, mode=cached["mode"]+"_cached",
             cache_hit=True, lang=cached.get("lang", lang))
 
-    # ── 4. RAG Search ────────────────────────────────────────
-    history         = get_history(session_id, limit=MAX_HISTORY)
     query_processed = preprocess_query(query)
     hits            = rag_search_best(query, query_processed)
     confidence      = hits[0]["score"] if hits else 0.0
     rag_relevant    = is_rag_relevant(hits, query)
 
-    logger.info(
-        "[RAG] conf=%.3f | pertinent=%s | chunks=%d",
-        confidence, rag_relevant, len(hits)
-    )
+    logger.info("[RAG] conf=%.3f | pertinent=%s | chunks=%d", confidence, rag_relevant, len(hits))
     for i, h in enumerate(hits[:3]):
-        logger.info(
-            "[CHUNK-%d] %.3f | %s | '%s'",
-            i+1, h["score"], h["filename"], h["text"][:80]
-        )
+        logger.info("[CHUNK-%d] %.3f | %s | '%s'...", i+1, h["score"], h["filename"], h["text"][:80])
 
-    # ── 5. Génération ────────────────────────────────────────
     if hits and confidence >= CONF_LOW and rag_relevant:
         rag_used = True
-        # [FIX-2] lang transmis pour que _generate_sync choisisse
-        # le bon prompt système et les bons messages de fallback
         answer, answer_mode = await generate_answer(query, hits, lang)
-        with _metrics_lock:
-            if answer_mode == "generative":
-                _global_metrics["generative_count"] += 1
-            else:
-                _global_metrics["extractive_count"] += 1
     else:
         reason      = "confiance_faible" if confidence < CONF_LOW else "chunk_non_pertinent"
         log_unanswered(session_id, query, reason, is_telecom=True)
@@ -1294,7 +1400,6 @@ async def chat(request: ChatRequest):
         with _metrics_lock:
             _global_metrics["no_info_count"] += 1
 
-    # ── 6. Anti-hallucination finale ─────────────────────────
     if any(sig in answer.lower() for sig in HALLUCINATION_SIGNALS):
         log_unanswered(session_id, query, "hallucination_detectee", is_telecom=True)
         answer      = get_fallback(lang)
@@ -1302,7 +1407,6 @@ async def chat(request: ChatRequest):
         with _metrics_lock:
             _global_metrics["hallucination_count"] += 1
 
-    # ── 7. Sauvegarde ────────────────────────────────────────
     save_message(session_id, "user", query)
     save_message(session_id, "assistant", answer)
     elapsed = int((time.time() - t0) * 1000)
@@ -1316,8 +1420,7 @@ async def chat(request: ChatRequest):
         for h in (hits if rag_used else [])
     ]
 
-    if (SEMANTIC_CACHE_ENABLED and rag_used
-            and answer_mode in ("generative", "extractive_validation")):
+    if SEMANTIC_CACHE_ENABLED and rag_used and answer_mode == "generative":
         _semantic_cache.set(query, {
             "answer": answer, "sources": sources,
             "rag_used": rag_used, "confidence": confidence,
@@ -1331,8 +1434,8 @@ async def chat(request: ChatRequest):
         _global_metrics["confidence_scores"].append(confidence)
 
     logger.info(
-        "[%s] %dms | conf=%.3f | rag=%s | lang=%s",
-        answer_mode, elapsed, confidence, rag_used, lang
+        "[%s] %dms | conf=%.3f | rag=%s | lang=%s | quant=%s",
+        answer_mode, elapsed, confidence, rag_used, lang, _gen_manager.quant_mode()
     )
     return ChatResponse(
         session_id=session_id, answer=answer, sources=sources,
@@ -1347,7 +1450,7 @@ async def chat(request: ChatRequest):
 @app.post("/feedback", tags=["Feedback"])
 async def feedback_endpoint(req: FeedbackRequest):
     if req.rating not in (1, -1):
-        raise HTTPException(400, "rating doit être 1 ou -1")
+        raise HTTPException(400, "rating doit etre 1 ou -1")
     ts = req.timestamp or datetime.now().isoformat()
     with _db_lock:
         with get_db() as conn:
@@ -1416,7 +1519,7 @@ async def rag_add(req: RagEntryRequest, user=Depends(require_auth)):
     chunk_id   = f"admin_{uuid.uuid4().hex[:12]}"
     chunk_text = (
         f"Pour la question : {req.question.strip()}, "
-        f"voici la réponse : {req.answer.strip()}."
+        f"voici la reponse : {req.answer.strip()}."
     )
     try:
         _collection.add(
@@ -1459,7 +1562,7 @@ async def clear_cache(user=Depends(require_auth)):
 
 
 # ─────────────────────────────────────────────────────────────
-# MÉTRIQUES & HEALTH — [FIX-5] ajout validation_rejection_reasons
+# METRIQUES & HEALTH
 # ─────────────────────────────────────────────────────────────
 @app.get("/metrics", tags=["Admin"])
 async def get_metrics(user=Depends(require_auth)):
@@ -1468,86 +1571,94 @@ async def get_metrics(user=Depends(require_auth)):
     n    = m["total_requests"] or 1
     conf = m.pop("confidence_scores", [])
     m.pop("response_lengths", [])
-    # [FIX-5] Sérialiser le Counter pour JSON
     rejection_reasons = dict(m.pop("validation_rejection_reasons", {}))
-    vram_used = (
-        torch.cuda.memory_allocated(0)/1e9
-        if torch.cuda.is_available() else 0
-    )
+    vram_used = (torch.cuda.memory_allocated(0)/1e9 if torch.cuda.is_available() else 0)
+    vram_free = _get_free_vram_gb()
     return {
         **m,
-        "rag_rate":                   m["rag_used_count"] / n,
-        "avg_latency_ms":             m["total_latency_ms"] / n,
-        "avg_confidence":             statistics.mean(conf) if conf else 0,
-        "generative_rate":            m["generative_count"] / n,
-        "no_info_rate":               m["no_info_count"] / n,
-        "cache_hit_rate":             m["cache_hit_count"] / n,
-        "validation_rejected_rate":   m["validation_rejected_count"] / n,
-        "lang_rejected_rate":         m["lang_rejected_count"] / n,
-        "arabic_query_rate":          m["arabic_query_count"] / n,
-        # [FIX-5] Détail des rejets de validation
+        "rag_rate":                    m["rag_used_count"] / n,
+        "avg_latency_ms":              m["total_latency_ms"] / n,
+        "avg_confidence":              statistics.mean(conf) if conf else 0,
+        "generative_rate":             m["generative_count"] / n,
+        "no_info_rate":                m["no_info_count"] / n,
+        "cache_hit_rate":              m["cache_hit_count"] / n,
+        "validation_rejected_rate":    m["validation_rejected_count"] / n,
+        "lang_rejected_rate":          m["lang_rejected_count"] / n,
+        "arabic_query_rate":           m["arabic_query_count"] / n,
         "validation_rejection_reasons": rejection_reasons,
-        "model_loaded":               _gen_manager.is_loaded(),
-        "version":                    "1.2.0",
-        "model_dir":                  MODEL_DIR,
-        "collection":                 COLLECTION_NAME,
-        "conf_low":                   CONF_LOW,
-        "min_context_coverage":       MIN_CONTEXT_COVERAGE,
-        "max_new_tokens":             MAX_NEW_TOKENS,
-        "gen_timeout_s":              GEN_TIMEOUT_S,
-        "gpu_vram_used_gb":           round(vram_used, 2),
-        "semantic_cache_size":        _semantic_cache.size(),
-        "supported_languages":        ["fr", "ar"],
-        "timestamp":                  datetime.now().isoformat(),
+        "generative_errors": {
+            "oom":       m["generative_error_oom"],
+            "runtime":   m["generative_error_runtime"],
+            "other":     m["generative_error_other"],
+            "vram_skip": m["generative_vram_skip"],
+        },
+        "generative_retries": {
+            "success": m["generative_retry_success"],
+            "fail":    m["generative_retry_fail"],
+        },
+        "model_loaded":                _gen_manager.is_loaded(),
+        "quant_mode":                  _gen_manager.quant_mode(),
+        "use_4bit":                    USE_4BIT,
+        "version":                     "1.6.0",
+        "model_dir":                   MODEL_DIR,
+        "collection":                  COLLECTION_NAME,
+        "conf_low":                    CONF_LOW,
+        "min_context_coverage":        MIN_CONTEXT_COVERAGE,
+        "max_new_tokens":              MAX_NEW_TOKENS,
+        "max_input_length":            MAX_INPUT_LENGTH,
+        "gen_timeout_s":               GEN_TIMEOUT_S,
+        "gen_max_retries":             GEN_MAX_RETRIES,
+        "gpu_vram_used_gb":            round(vram_used, 2),
+        "gpu_vram_free_gb":            round(vram_free, 2),
+        "rag_context_chars_simple":    RAG_CONTEXT_CHARS_SIMPLE,
+        "rag_context_chars_multiline": RAG_CONTEXT_CHARS_MULTILINE,
+        "semantic_cache_size":         _semantic_cache.size(),
+        "supported_languages":         ["fr", "ar"],
+        "timestamp":                   datetime.now().isoformat(),
     }
 
 @app.get("/health", tags=["Systeme"])
 async def health():
     n_chunks = _collection.count() if _collection else 0
     with get_db() as conn:
-        n_msgs  = conn.execute(
-            "SELECT COUNT(*) as c FROM conversations"
-        ).fetchone()["c"]
-        n_sess  = conn.execute(
-            "SELECT COUNT(DISTINCT session_id) as c FROM conversations"
-        ).fetchone()["c"]
-        n_fb    = conn.execute(
-            "SELECT COUNT(*) as c FROM feedback"
-        ).fetchone()["c"]
-        n_rag   = conn.execute(
-            "SELECT COUNT(*) as c FROM rag_enrichments"
-        ).fetchone()["c"]
-        n_unans = conn.execute(
-            "SELECT COUNT(*) as c FROM unanswered_questions"
-        ).fetchone()["c"]
-    vram_used = (
-        torch.cuda.memory_allocated(0)/1e9
+        n_msgs  = conn.execute("SELECT COUNT(*) as c FROM conversations").fetchone()["c"]
+        n_sess  = conn.execute("SELECT COUNT(DISTINCT session_id) as c FROM conversations").fetchone()["c"]
+        n_fb    = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"]
+        n_rag   = conn.execute("SELECT COUNT(*) as c FROM rag_enrichments").fetchone()["c"]
+        n_unans = conn.execute("SELECT COUNT(*) as c FROM unanswered_questions").fetchone()["c"]
+    vram_used  = (torch.cuda.memory_allocated(0)/1e9 if torch.cuda.is_available() else 0)
+    vram_free  = _get_free_vram_gb()
+    vram_total = (
+        torch.cuda.get_device_properties(0).total_memory / 1e9
         if torch.cuda.is_available() else 0
     )
+    model_loaded = _gen_manager.is_loaded()
+    status = "ok" if (model_loaded and n_chunks > 0 and vram_free >= 0.3) else (
+        "vram_critical" if vram_free < 0.3 else "degraded"
+    )
     return {
-        "status":               "ok" if n_chunks > 0 else "degraded",
-        "version":              "1.2.0",
+        "status":               status,
+        "version":              "1.6.0",
         "model":                "Phi-3.5-mini-instruct",
-        "model_loaded":         _gen_manager.is_loaded(),
-        "dtype":                "float16",
-        "attn":                 "eager (RTX 2070 Turing)",
-        "bitsandbytes":         False,
-        "gpu":                  (torch.cuda.get_device_name(0)
-                                 if torch.cuda.is_available() else "cpu"),
+        "model_loaded":         model_loaded,
+        "quant_mode":           _gen_manager.quant_mode(),
+        "use_4bit":             USE_4BIT,
+        "gpu":                  (torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
         "gpu_vram_used_gb":     round(vram_used, 2),
+        "gpu_vram_free_gb":     round(vram_free, 2),
+        "gpu_vram_total_gb":    round(vram_total, 1),
         "rag_chunks":           n_chunks,
         "collection":           COLLECTION_NAME,
-        "chroma_dir":           CHROMA_DB_DIR,
         "total_messages":       n_msgs,
         "total_sessions":       n_sess,
         "total_feedback":       n_fb,
         "rag_enrichments":      n_rag,
         "unanswered":           n_unans,
         "cache_size":           _semantic_cache.size(),
-        "supported_languages":  ["fr", "ar"],
         "min_context_coverage": MIN_CONTEXT_COVERAGE,
         "max_new_tokens":       MAX_NEW_TOKENS,
-        "gen_timeout_s":        GEN_TIMEOUT_S,
+        "max_input_length":     MAX_INPUT_LENGTH,
+        "gen_max_retries":      GEN_MAX_RETRIES,
         "timestamp":            datetime.now().isoformat(),
     }
 
@@ -1609,7 +1720,7 @@ async def root():
     html_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(html_path):
         return FileResponse(html_path)
-    return {"message": "Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.2"}
+    return {"message": "Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.6"}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1618,27 +1729,14 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.2")
+    print("  Chatbot Tunisie Telecom — Phi-3.5-mini-instruct v1.6")
     print("=" * 60)
-    print(f"  Modèle       : {MODEL_DIR}")
-    print(f"  Base         : {BASE_MODEL}")
-    print(f"  dtype        : float16 (sans bitsandbytes)")
-    print(f"  attn         : eager (RTX 2070 Turing)")
-    print(f"  ChromaDB     : {CHROMA_DB_DIR} / {COLLECTION_NAME}")
-    print(f"  DB           : {DB_PATH}")
-    print(f"  Port         : {API_PORT}")
-    print()
-    print("  CORRECTIFS v1.2 (mode génératif) :")
-    print(f"  [FIX-1] MIN_CONTEXT_COVERAGE    : 0.20 → {MIN_CONTEXT_COVERAGE}")
-    print(f"  [FIX-2] Validation assouplie    : overlap 0.85→0.92, contexte étendu")
-    print(f"  [FIX-3] Contexte RAG            : 550/700 → 900/1200 chars")
-    print(f"  [FIX-4] CUDA lock               : actif")
-    print(f"  [FIX-5] Métriques rejet détail  : /metrics → validation_rejection_reasons")
-    print()
-    print(f"  Max tokens   : {MAX_NEW_TOKENS}")
-    print(f"  Timeout gen  : {GEN_TIMEOUT_S}s")
-    print()
-    print("  Attention : Phi-3.5 fp16 ≈ 7.6 GB VRAM")
-    print("  Sur RTX 2070 8GB : marge très serrée")
+    print(f"  MODEL_DIR        : {MODEL_DIR}")
+    print(f"  MAX_INPUT_LENGTH : {MAX_INPUT_LENGTH}")
+    print(f"  RAG_CONTEXT      : {RAG_CONTEXT_CHARS_SIMPLE}/{RAG_CONTEXT_CHARS_MULTILINE} chars")
+    print(f"  GEN_MAX_RETRIES  : {GEN_MAX_RETRIES}")
+    print(f"  ChromaDB         : {CHROMA_DB_DIR} / {COLLECTION_NAME}")
+    print(f"  DB               : {DB_PATH}")
+    print(f"  Port             : {API_PORT}")
     print("=" * 60)
     uvicorn.run(app, host=API_HOST, port=API_PORT, reload=False, log_level="info")
