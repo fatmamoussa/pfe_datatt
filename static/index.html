@@ -1,0 +1,1413 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Tunisie Telecom — Assistant IA</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Plus Jakarta Sans', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
+      },
+      colors: {
+        brand: {
+          50:  '#eff6ff',
+          100: '#dbeafe',
+          200: '#bfdbfe',
+          300: '#93c5fd',
+          400: '#60a5fa',
+          500: '#3b82f6',
+          600: '#1d4ed8',
+          700: '#1e40af',
+          800: '#1e3a8a',
+          900: '#172554',
+        },
+        surface: '#f8fafc',
+        canvas: '#f1f5f9',
+      },
+      boxShadow: {
+        'card': '0 1px 3px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.04)',
+        'card-hover': '0 4px 12px rgba(0,0,0,.08), 0 12px 32px rgba(0,0,0,.06)',
+        'input-focus': '0 0 0 3px rgba(59,130,246,.15)',
+        'btn': '0 1px 2px rgba(0,0,0,.08)',
+        'btn-primary': '0 1px 3px rgba(30,64,175,.3), 0 4px 12px rgba(30,64,175,.15)',
+      },
+      borderRadius: {
+        'xl': '12px',
+        '2xl': '16px',
+        '3xl': '20px',
+      },
+      animation: {
+        'slide-up': 'slideUp .3s cubic-bezier(0.34,1.56,0.64,1)',
+        'fade-in': 'fadeIn .2s ease-out',
+        'pulse-dot': 'pulseDot 2s ease-in-out infinite',
+        'typing': 'typing 1.2s infinite',
+        'spin-slow': 'spin 2s linear infinite',
+      },
+      keyframes: {
+        slideUp: { from:{ opacity:0, transform:'translateY(16px) scale(0.98)' }, to:{ opacity:1, transform:'translateY(0) scale(1)' } },
+        fadeIn: { from:{ opacity:0, transform:'translateY(-4px)' }, to:{ opacity:1, transform:'translateY(0)' } },
+        pulseDot: { '0%,100%':{ opacity:1 }, '50%':{ opacity:.3 } },
+        typing: { '0%,60%,100%':{ transform:'translateY(0)', opacity:.4 }, '30%':{ transform:'translateY(-4px)', opacity:1 } },
+      }
+    }
+  }
+}
+</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: 'Plus Jakarta Sans', sans-serif; background: #f1f5f9; color: #0f172a; }
+
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+  #auth-overlay { position:fixed; inset:0; z-index:1000; background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 50%, #2563eb 100%); display:flex; align-items:center; justify-content:center; padding:20px; }
+  #auth-overlay.hidden { display:none; }
+  .auth-card { background:#fff; border-radius:20px; padding:40px 44px; width:100%; max-width:440px; box-shadow:0 20px 60px rgba(0,0,0,.18), 0 4px 16px rgba(0,0,0,.1); animation: slideUp .35s cubic-bezier(0.34,1.56,0.64,1); }
+  #auth-overlay::before { content:''; position:absolute; inset:0; background-image: linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px), linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px); background-size:40px 40px; pointer-events:none; }
+
+  .form-input { width:100%; padding:10px 13px; border-radius:10px; border:1.5px solid #e2e8f0; background:#f8fafc; font-family:'Plus Jakarta Sans',sans-serif; font-size:.875rem; color:#0f172a; outline:none; transition: border-color .18s, box-shadow .18s, background .18s; }
+  .form-input:focus { border-color: #3b82f6; background:#fff; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+  .form-input.err { border-color:#ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.1); }
+  .form-input::placeholder { color:#94a3b8; }
+
+  .btn-primary { width:100%; padding:11px; border-radius:10px; background: linear-gradient(135deg, #1e40af, #2563eb); color:#fff; border:none; font-family:'Plus Jakarta Sans',sans-serif; font-size:.9rem; font-weight:600; cursor:pointer; letter-spacing:.01em; transition: all .18s; box-shadow: 0 1px 3px rgba(30,64,175,.3), 0 4px 12px rgba(30,64,175,.15); }
+  .btn-primary:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(30,64,175,.35); }
+  .btn-primary:active { transform:scale(.98); }
+  .btn-primary:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+
+  .code-digit { width:46px; height:52px; text-align:center; font-size:1.4rem; font-weight:700; font-family:'JetBrains Mono',monospace; border:1.5px solid #e2e8f0; border-radius:10px; background:#f8fafc; outline:none; color:#0f172a; transition:all .18s; }
+  .code-digit:focus { border-color:#3b82f6; background:#fff; box-shadow:0 0 0 3px rgba(59,130,246,.12); }
+
+  .session-rename-input { width:100%; padding:3px 8px; border-radius:6px; border:1.5px solid #3b82f6; font-family:'Plus Jakarta Sans',sans-serif; font-size:.8rem; font-weight:500; color:#0f172a; background:#fff; outline:none; }
+
+  #chat-input { flex:1; background:#f8fafc; border:1.5px solid #e2e8f0; border-radius:11px; padding:10px 14px; color:#0f172a; font-family:'Plus Jakarta Sans',sans-serif; font-size:.875rem; resize:none; min-height:42px; max-height:110px; outline:none; transition:all .18s; line-height:1.5; }
+  #chat-input:focus { border-color:#3b82f6; background:#fff; box-shadow:0 0 0 3px rgba(59,130,246,.1); }
+  #chat-input::placeholder { color:#94a3b8; }
+  #chat-input:disabled { opacity:.5; cursor:not-allowed; }
+
+  .typing-dot { width:5px; height:5px; background:#94a3b8; border-radius:50%; animation:typing 1.2s infinite; }
+  .typing-dot:nth-child(2) { animation-delay:.2s; }
+  .typing-dot:nth-child(3) { animation-delay:.4s; }
+
+  #toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(12px); background:#0f172a; color:#f8fafc; font-size:.78rem; font-family:'JetBrains Mono',monospace; padding:8px 18px; border-radius:8px; opacity:0; transition:all .22s; pointer-events:none; z-index:999; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  #toast.err { background:#dc2626; }
+
+  .auth-step { display:none; }
+  .auth-step.active { display:block; }
+
+  .tab-btn { padding:6px 16px; border-radius:8px; font-size:.78rem; font-weight:500; cursor:pointer; border:none; background:transparent; color:#64748b; font-family:'Plus Jakarta Sans',sans-serif; transition:all .18s; }
+  .tab-btn.active { background:#fff; color:#1e40af; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.1); }
+  .tab-btn:not(.active):hover { background:rgba(255,255,255,.6); color:#334155; }
+  .tab-btn.hidden { display:none; }
+
+  .msg { display:flex; gap:10px; animation: msgIn .18s ease-out; }
+  @keyframes msgIn { from{ opacity:0; transform:translateY(5px); } to{ opacity:1; transform:translateY(0); } }
+
+  .btn-mic.recording::after { content:''; position:absolute; inset:-3px; border-radius:14px; border:2px solid #ef4444; animation: micRing 1s infinite; opacity:0; }
+  @keyframes micRing { 0%{ inset:-1px; opacity:.5; } 100%{ inset:-9px; opacity:0; } }
+
+  .score-bar-wrap { background:#f1f5f9; border-radius:20px; height:3px; overflow:hidden; margin-top:5px; }
+  .score-bar { height:100%; border-radius:20px; transition:width .4s ease, background .4s; }
+
+  .email-check { display:flex; align-items:center; gap:6px; margin-top:5px; min-height:18px; font-size:.72rem; }
+  .email-check-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+  .email-check.checking { color:#94a3b8; }
+  .email-check.checking .email-check-dot { background:#94a3b8; animation:pulseDot .8s infinite; }
+  .email-check.valid { color:#16a34a; }
+  .email-check.valid .email-check-dot { background:#16a34a; }
+  .email-check.invalid { color:#dc2626; }
+  .email-check.invalid .email-check-dot { background:#dc2626; }
+  .email-check.warning { color:#d97706; }
+  .email-check.warning .email-check-dot { background:#d97706; }
+
+  .session-item { padding:9px 12px; border-radius:9px; cursor:pointer; margin-bottom:3px; transition:all .15s; border:1px solid transparent; position:relative; }
+  .session-item:hover { background:#f1f5f9; }
+  .session-item:hover .session-rename-btn { opacity:1; }
+  .session-item.active { background:#eff6ff; border-color:#bfdbfe; }
+  .session-rename-btn { position:absolute; top:50%; right:8px; transform:translateY(-50%); width:20px; height:20px; border-radius:5px; border:none; background:transparent; cursor:pointer; display:flex; align-items:center; justify-content:center; opacity:0; transition:all .15s; color:#94a3b8; padding:0; }
+  .session-rename-btn:hover { background:#e2e8f0; color:#3b82f6; }
+  .session-item.active .session-rename-btn { opacity:.6; }
+
+  .status-dot { width:7px; height:7px; border-radius:50%; }
+  .status-dot.online { background:#16a34a; box-shadow:0 0 0 2px rgba(22,163,74,.2); animation:pulseDot 2s infinite; }
+  .status-dot.offline { background:#dc2626; }
+  .status-dot.loading { background:#d97706; animation:pulseDot .8s infinite; }
+
+  .fb-btn { display:flex; align-items:center; gap:4px; padding:3px 10px; border-radius:20px; font-size:.71rem; font-weight:500; border:1px solid #e2e8f0; background:transparent; cursor:pointer; font-family:'Plus Jakarta Sans',sans-serif; color:#64748b; transition:all .15s; }
+  .fb-btn.up:hover { border-color:#16a34a; color:#16a34a; background:#f0fdf4; }
+  .fb-btn.down:hover { border-color:#dc2626; color:#dc2626; background:#fef2f2; }
+  .fb-btn.voted.up { border-color:#16a34a; color:#16a34a; background:#f0fdf4; cursor:default; }
+  .fb-btn.voted.down { border-color:#dc2626; color:#dc2626; background:#fef2f2; cursor:default; }
+  .fb-btn.speak:hover { border-color:#3b82f6; color:#3b82f6; background:#eff6ff; }
+  .fb-btn:disabled { opacity:.4; cursor:not-allowed; }
+
+  .rag-entry-item { padding:10px 12px; border-radius:9px; margin-bottom:5px; background:#f0fdf4; border:1px solid #bbf7d0; }
+
+  .demo-code { display:none; margin-top:8px; padding:8px 12px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; text-align:center; font-size:.76rem; color:#92400e; font-family:'JetBrains Mono',monospace; }
+  .demo-code.show { display:block; }
+
+  .new-metric { animation: highlightRow .8s ease-out; }
+  @keyframes highlightRow { 0%{ background:#dbeafe; } 100%{ background:transparent; } }
+
+  #c-themes, #c-sat { display:block; }
+
+  .skel { background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%); background-size:200% 100%; animation:shimmer 1.5s infinite; border-radius:7px; height:14px; margin-bottom:8px; }
+  @keyframes shimmer { 0%{ background-position:200% 0; } 100%{ background-position:-200% 0; } }
+
+  main { flex:1; overflow:hidden; display:flex; }
+  .view { display:none; width:100%; }
+  .view.active { display:flex; }
+  #view-chat { flex-direction:row; }
+  #view-admin { flex-direction:column; overflow:hidden; }
+  #view-metrics { flex-direction:column; overflow:hidden; }
+  #view-analyse { flex-direction:column; overflow-y:auto; }
+
+  #messages { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px; }
+  #session-list { flex:1; overflow-y:auto; padding:8px; }
+  .admin-panel-body { flex:1; overflow-y:auto; padding:10px; }
+  .metrics-scroll { flex:1; overflow-y:auto; }
+  .scroll { max-height:300px; overflow-y:auto; }
+
+  .msg-item.user-msg { justify-content: flex-end; }
+  .msg-item.bot-msg { justify-content: flex-start; }
+  .msg-item { display: flex; gap: 10px; }
+  .user-msg .msg-body { order: 1; }
+  .user-msg .flex-shrink-0 { order: 2; }
+</style>
+</head>
+<body class="flex flex-col h-screen bg-slate-100">
+
+<!-- ═══ AUTH OVERLAY ═══ -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <div class="flex items-center gap-3 mb-8">
+      <div class="w-10 h-10 bg-white border border-slate-200 rounded-xl flex items-center justify-center flex-shrink-0">
+        <img src="/static/logo.png" alt="TT" class="w-5 h-5 object-contain"/>
+      </div>
+      <div>
+        <div class="text-sm font-bold text-slate-800 leading-tight">Tunisie Telecom</div>
+        <div class="text-xs text-slate-400 font-mono tracking-wide">Assistant IA — RAG Platform</div>
+      </div>
+    </div>
+    <div id="auth-err" class="hidden mb-4 px-3 py-2.5 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm"></div>
+    <div class="auth-step active" id="step-login">
+      <h1 class="text-xl font-bold text-slate-900 mb-1">Connexion</h1>
+      <p class="text-sm text-slate-400 mb-6 leading-relaxed">Accédez à votre plateforme conversationnelle IA</p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Adresse e-mail</label>
+          <input class="form-input" id="login-email" type="email" placeholder="vous@email.com" oninput="clrErr('login-email')"/>
+          <p class="text-xs text-red-500 mt-1 min-h-4" id="login-email-err"></p>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Mot de passe</label>
+          <input class="form-input" id="login-pwd" type="password" placeholder="••••••••" oninput="clrErr('login-pwd')" onkeydown="if(event.key==='Enter')doLogin()"/>
+          <p class="text-xs text-red-500 mt-1 min-h-4" id="login-pwd-err"></p>
+        </div>
+      </div>
+      <button class="btn-primary mt-5" id="btn-login" onclick="doLogin()">
+        <span class="flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg>
+          Se connecter
+        </span>
+      </button>
+      <p class="text-center text-sm text-slate-400 mt-5">Pas de compte ? <a class="text-brand-600 font-medium cursor-pointer hover:underline" onclick="showStep('step-register')">Créer un compte</a></p>
+    </div>
+    <div class="auth-step" id="step-register">
+      <h1 class="text-xl font-bold text-slate-900 mb-1">Créer un compte</h1>
+      <p class="text-sm text-slate-400 mb-6">Rejoignez la plateforme IA Tunisie Telecom</p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Nom complet</label>
+          <input class="form-input" id="reg-name" type="text" placeholder="Votre nom" oninput="clrErr('reg-name')"/>
+          <p class="text-xs text-red-500 mt-1 min-h-4" id="reg-name-err"></p>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Adresse e-mail</label>
+          <input class="form-input" id="reg-email" type="email" placeholder="vous@email.com" oninput="clrErr('reg-email');scheduleEmailCheck(this.value)" onblur="scheduleEmailCheck(this.value,true)"/>
+          <p class="text-xs text-red-500 mt-1 min-h-4" id="reg-email-err"></p>
+          <div class="email-check hidden" id="reg-email-check"><div class="email-check-dot"></div><span id="reg-email-check-msg"></span></div>
+          <div class="score-bar-wrap hidden" id="reg-score-wrap"><div class="score-bar" id="reg-score-bar" style="width:0%"></div></div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Mot de passe</label>
+          <input class="form-input" id="reg-pwd" type="password" placeholder="••••••••" oninput="clrErr('reg-pwd')" onkeydown="if(event.key==='Enter')doRegister()"/>
+          <p class="text-xs text-red-500 mt-1 min-h-4" id="reg-pwd-err"></p>
+        </div>
+      </div>
+      <button class="btn-primary mt-5" id="btn-register" onclick="doRegister()">Créer mon compte</button>
+      <p class="text-center text-sm text-slate-400 mt-5">Déjà inscrit ? <a class="text-brand-600 font-medium cursor-pointer hover:underline" onclick="showStep('step-login')">Se connecter</a></p>
+    </div>
+    <div class="auth-step" id="step-verify">
+      <h1 class="text-xl font-bold text-slate-900 mb-1">Vérification</h1>
+      <p class="text-sm text-slate-400 mb-4">Code envoyé à</p>
+      <div class="flex items-center gap-2 px-3 py-2.5 bg-brand-50 border border-brand-100 rounded-lg mb-5">
+        <svg class="w-4 h-4 text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        <span class="text-sm font-medium text-brand-700 font-mono" id="verify-email-display">—</span>
+      </div>
+      <div class="demo-code" id="demo-code-block">Code de démonstration : <strong id="demo-code-val">——————</strong></div>
+      <div class="flex gap-2 justify-center my-5">
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d0" onkeydown="codeKey(event,0)" oninput="codeInput(event,0)"/>
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d1" onkeydown="codeKey(event,1)" oninput="codeInput(event,1)"/>
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d2" onkeydown="codeKey(event,2)" oninput="codeInput(event,2)"/>
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d3" onkeydown="codeKey(event,3)" oninput="codeInput(event,3)"/>
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d4" onkeydown="codeKey(event,4)" oninput="codeInput(event,4)"/>
+        <input class="code-digit" maxlength="1" type="text" inputmode="numeric" id="d5" onkeydown="codeKey(event,5)" oninput="codeInput(event,5)"/>
+      </div>
+      <p class="text-xs text-red-500 text-center mb-3 min-h-4" id="verify-err"></p>
+      <button class="btn-primary" id="btn-verify" onclick="doVerify()">Valider le code</button>
+      <p class="text-center text-sm text-slate-400 mt-4">Pas reçu ? <a class="text-brand-600 font-medium cursor-pointer hover:underline" onclick="doResend()">Renvoyer</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FEEDBACK POPUP ═══ -->
+<div class="fixed inset-0 z-50 hidden bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-5" id="fb-popup">
+  <div class="bg-white rounded-2xl p-7 w-full max-w-md shadow-card-hover animate-slide-up">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-8 h-8 bg-red-50 rounded-lg flex items-center justify-center">
+        <svg class="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5"/></svg>
+      </div>
+      <h3 class="font-bold text-slate-900">Signaler un problème</h3>
+    </div>
+    <p class="text-sm text-slate-400 mb-4 leading-relaxed">Votre retour améliore la qualité du modèle RAG.</p>
+    <div class="hidden bg-slate-50 border border-slate-200 rounded-lg p-3 mb-3" id="fb-question-box">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Question posée</p>
+      <p class="text-sm text-slate-700 italic" id="fb-question-text"></p>
+    </div>
+    <div class="hidden bg-red-50 border border-red-200 rounded-lg p-3 mb-3" id="fb-bot-box">
+      <p class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1.5">Réponse incorrecte du bot</p>
+      <p class="text-sm text-red-700 italic" id="fb-bot-text"></p>
+    </div>
+    <textarea class="form-input" id="fb-comment" placeholder="Décrivez le problème (optionnel)…" rows="3" style="resize:none; min-height:72px;"></textarea>
+    <div class="flex gap-2.5 mt-4 justify-end">
+      <button onclick="closeFbPopup()" class="px-4 py-2 text-sm text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">Ignorer</button>
+      <button onclick="submitFbComment()" class="px-5 py-2 text-sm font-semibold text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors">Envoyer</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ RAG MODAL ═══ -->
+<div class="fixed inset-0 z-50 hidden bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-5" id="rag-modal">
+  <div class="bg-white rounded-2xl p-7 w-full max-w-lg shadow-card-hover animate-slide-up">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-8 h-8 bg-brand-50 rounded-lg flex items-center justify-center">
+        <svg class="w-4 h-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+      </div>
+      <h3 class="font-bold text-slate-900" id="rag-modal-title">Ajouter une entrée RAG</h3>
+    </div>
+    <p class="text-sm text-slate-400 mb-5 leading-relaxed">La réponse sera indexée dans ChromaDB et disponible immédiatement.</p>
+    <div class="hidden mb-4" id="rag-q-preview-wrap">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Question source</p>
+      <div class="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-700 italic" id="rag-q-preview"></div>
+    </div>
+    <div class="hidden mb-3 px-3 py-2.5 rounded-lg text-sm" id="rag-alert"></div>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Question</label>
+        <input class="form-input" id="rag-question" type="text" placeholder="Ex: Comment activer l'offre Hayya ?"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Réponse correcte</label>
+        <textarea class="form-input" id="rag-answer" placeholder="Rédigez la réponse complète et précise..." style="resize:vertical; min-height:80px; line-height:1.6;"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Thème</label>
+        <select class="form-input" id="rag-theme">
+          <option value="entreprise">Entreprise</option>
+          <option value="vas">USSD</option>
+          <option value="internet_fixe">Internet Fixe</option>
+          <option value="internet_mobile">Internet Mobile</option>
+          <option value="roaming">Roaming International</option>
+          <option value="mobile_prepaid">Mobile Prépayé</option>
+          <option value="mobile_postpaid">Mobile Postpayé</option>
+          <option value="general">Offre</option>
+        </select>
+      </div>
+    </div>
+    <div class="flex gap-2.5 mt-6 justify-end">
+      <button onclick="closeRagModal()" class="px-4 py-2 text-sm text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">Annuler</button>
+      <button onclick="submitRag()" id="rag-submit-btn" class="px-5 py-2 text-sm font-semibold text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors">Ajouter au RAG</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ APP SHELL ═══ -->
+<header class="flex-shrink-0 bg-white border-b border-slate-200 h-14 flex items-center px-5 gap-4 z-10" style="box-shadow:0 1px 3px rgba(0,0,0,.06);">
+  <div class="flex items-center gap-3 mr-4">
+    <div class="w-8 h-8 bg-white border border-slate-200 rounded-lg flex items-center justify-center flex-shrink-0 shadow-card">
+      <img src="/static/logo.png" alt="TT" style="width:20px;height:20px;object-fit:contain;"/>
+    </div>
+    <div class="flex flex-col leading-tight">
+      <span class="text-sm font-bold text-slate-800 leading-tight">Tunisie Telecom</span>
+      <span class="text-xs text-slate-400 font-mono tracking-wide leading-tight">Assistant IA</span>
+    </div>
+  </div>
+  <div class="flex gap-1 bg-slate-100 rounded-xl p-1 border border-slate-200">
+    <button class="tab-btn active" onclick="switchView('chat',this)">
+      <span class="flex items-center gap-1.5">
+        <img src="/static/logo.png" alt="TT" class="w-3.5 h-3.5 object-contain"/>
+        Chat
+      </span>
+    </button>
+    <button class="tab-btn hidden" id="tab-admin" onclick="switchView('admin',this)">
+      <span class="flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        Administration
+      </span>
+    </button>
+    <button class="tab-btn hidden" id="tab-metrics" onclick="switchView('metrics',this)">
+      <span class="flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+        Métriques IA
+      </span>
+    </button>
+    <button class="tab-btn hidden" id="tab-analyse" onclick="switchView('analyse',this)">
+      <span class="flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        Analyse BI
+      </span>
+    </button>
+  </div>
+  <div class="flex items-center gap-4 ml-auto">
+    <div class="flex items-center gap-2">
+      <div class="status-dot loading" id="status-dot"></div>
+      <span class="text-xs font-mono text-slate-400" id="status-label">connecting...</span>
+    </div>
+    <div class="relative" id="user-menu" onclick="toggleDD()">
+      <div class="flex items-center gap-2 cursor-pointer pl-3 border-l border-slate-200">
+        <div class="w-8 h-8 bg-gradient-to-br from-brand-600 to-brand-400 rounded-lg flex items-center justify-center text-white text-xs font-bold" id="user-av">?</div>
+        <div class="hidden sm:flex flex-col leading-tight">
+          <span class="text-xs font-semibold text-slate-700" id="dd-name-h">—</span>
+          <span class="text-xs font-mono text-slate-400" id="user-badge">—</span>
+        </div>
+        <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+      </div>
+      <div class="user-dd hidden absolute top-full right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-card-hover py-1.5 w-52 z-50 animate-fade-in" id="user-dd">
+        <div class="px-4 py-2">
+          <p class="text-sm font-semibold text-slate-800" id="dd-name">—</p>
+          <p class="text-xs font-mono text-slate-400 truncate" id="dd-email">—</p>
+        </div>
+        <div class="border-t border-slate-100 my-1"></div>
+        <button class="hidden w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 flex items-center gap-2.5 transition-colors" id="dd-admin-link" onclick="switchView('admin',document.getElementById('tab-admin'))">Administration</button>
+        <button class="hidden w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 flex items-center gap-2.5 transition-colors" id="dd-metrics-link" onclick="switchView('metrics',document.getElementById('tab-metrics'))">Métriques IA</button>
+        <div class="border-t border-slate-100 my-1"></div>
+        <button onclick="doLogout()" class="w-full text-left px-4 py-2 text-sm text-red-500 hover:bg-red-50 flex items-center gap-2.5 transition-colors">Déconnexion</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="flex-1 overflow-hidden flex">
+  <!-- ═══ CHAT VIEW ═══ -->
+  <div id="view-chat" class="view active">
+    <div class="w-56 flex-shrink-0 bg-white border-r border-slate-200 flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+        <span class="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Sessions</span>
+        <button onclick="newSession()" class="w-7 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 hover:bg-slate-50 transition-colors" title="Nouvelle session">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+        </button>
+      </div>
+      <div id="session-list"></div>
+    </div>
+    <div class="flex-1 flex flex-col overflow-hidden bg-slate-50 min-w-0">
+      <div class="flex items-center gap-3 px-5 py-2.5 bg-white border-b border-slate-200 flex-shrink-0">
+        <img src="/static/logo.png" alt="TT" class="w-4 h-4 object-contain opacity-50"/>
+        <span class="text-sm font-semibold text-slate-800">Conversation</span>
+        <span class="text-xs font-mono text-slate-400 bg-slate-100 px-2.5 py-0.5 rounded-full border border-slate-200" id="session-label">—</span>
+        <button onclick="clearCurrentSession()" class="ml-auto text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-300 px-3 py-1 rounded-lg transition-colors flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+          Effacer
+        </button>
+      </div>
+      <div id="messages"></div>
+      <div class="hidden items-center gap-3 px-5 py-2 bg-red-50 border-t border-red-200 flex-shrink-0" id="voice-bar">
+        <div class="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse"></div>
+        <span class="text-sm font-medium text-red-600" id="vbar-label">Écoute en cours...</span>
+        <span class="text-xs font-mono text-slate-400 truncate max-w-xs" id="vbar-transcript"></span>
+      </div>
+      <div class="flex gap-2 flex-wrap px-5 pb-2 bg-slate-50" id="suggestions">
+        <button onclick="useSugg(this)" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">Offres Hayya</button>
+        <button onclick="useSugg(this)" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">Activer NetBox</button>
+        <button onclick="useSugg(this)" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">Tarif roaming</button>
+        <button onclick="useSugg(this)" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">Smart ADSL</button>
+        <button onclick="useSugg(this)" class="text-sm px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">عروض الإنترنت</button>
+        <button onclick="useSugg(this)" class="text-sm px-3 py-1.5 rounded-full border border-slate-300 bg-white text-slate-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors">كيف أشحن رصيدي؟</button>
+      </div>
+      <div class="flex items-end gap-2 px-4 pb-4 pt-2 bg-white border-t border-slate-200 flex-shrink-0">
+        <div class="flex bg-slate-100 border border-slate-200 rounded-lg p-1 gap-1 flex-shrink-0 self-end">
+          <button id="lang-fr" onclick="setVoiceLang('fr')" class="px-3 h-8 rounded-md text-xs font-bold font-mono text-brand-700 bg-white shadow-sm transition-all">FR</button>
+          <button id="lang-ar" onclick="setVoiceLang('ar')" class="px-3 h-8 rounded-md text-xs font-bold font-mono text-slate-500 transition-all">ع</button>
+        </div>
+        <textarea id="chat-input" placeholder="Posez votre question…" rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <button id="btn-mic" onclick="toggleMic()" class="btn-mic relative w-10 h-10 flex-shrink-0 self-end flex items-center justify-center rounded-xl border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300 transition-all" title="Vocal">
+          <svg class="w-5 h-5 text-slate-500 mic-ic" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93C7.06 15.44 4 12.08 4 8H2c0 4.72 3.11 8.73 7.5 9.73V21h5v-3.27C18.89 16.73 22 12.72 22 8h-2c0 4.08-3.06 7.44-7 7.93z"/></svg>
+        </button>
+        <button id="btn-send" onclick="sendMessage()" class="w-10 h-10 flex-shrink-0 self-end flex items-center justify-center rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-95 transition-all shadow-btn" title="Envoyer">
+          <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ADMIN VIEW ═══ -->
+  <div id="view-admin" class="view">
+    <div class="flex-1 grid grid-cols-2 grid-rows-[auto_1fr_1fr] gap-3 p-4 overflow-auto bg-canvas">
+      <div class="col-span-2 grid grid-cols-5 gap-3">
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Messages</p><p class="text-3xl font-bold text-brand-700 font-mono" id="stat-messages">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Sessions</p><p class="text-3xl font-bold text-slate-800 font-mono" id="stat-sessions">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Sans réponse</p><p class="text-3xl font-bold text-slate-800 font-mono" id="stat-unanswered">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Chunks RAG</p><p class="text-3xl font-bold text-brand-700 font-mono" id="stat-chunks">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Satisfaction</p><p class="text-3xl font-bold text-green-600 font-mono" id="stat-satisfaction">—</p><div class="h-1 bg-slate-100 rounded-full overflow-hidden mt-2"><div class="h-full bg-green-500 rounded-full transition-all duration-700" id="sat-bar" style="width:0%"></div></div></div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Questions sans réponse</span>
+          <div class="flex gap-2">
+            <select class="text-xs font-mono bg-white border border-slate-200 text-slate-600 px-2 py-1.5 rounded-lg outline-none cursor-pointer" id="filter-reason" onchange="loadUnanswered()">
+              <option value="">Toutes</option>
+              <option value="hallucination_detectee">Hallucination</option>
+              <option value="telecom_sans_reponse">Télécom</option>
+            </select>
+            <button onclick="loadUnanswered()" class="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-brand-600 transition-colors"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+          </div>
+        </div>
+        <div class="admin-panel-body" id="unanswered-list"><div class="flex items-center justify-center h-20 text-sm text-slate-400">Chargement…</div></div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">État du système</span>
+          <button onclick="loadHealth()" class="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-brand-600 transition-colors"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+        </div>
+        <div class="admin-panel-body" id="health-panel"><div class="flex items-center justify-center h-20 text-sm text-slate-400">Chargement…</div></div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Retours négatifs</span>
+          <button onclick="loadFeedbackStats()" class="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-brand-600 transition-colors"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+        </div>
+        <div class="admin-panel-body" id="feedback-panel"><div class="flex items-center justify-center h-20 text-sm text-slate-400">Chargement…</div></div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">RAG — Enrichissements</span>
+          <button onclick="loadRagEntries()" class="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-brand-600 transition-colors"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+        </div>
+        <div class="admin-panel-body" id="rag-entries-panel"><div class="flex items-center justify-center h-20 text-sm text-slate-400">Chargement…</div></div>
+      </div>
+      <div class="col-span-2 bg-white rounded-xl border border-slate-200 shadow-card flex flex-col overflow-hidden">
+        <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex-shrink-0"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Analyse satisfaction</span></div>
+        <div class="admin-panel-body" id="sat-panel"><div class="flex items-center justify-center h-20 text-sm text-slate-400">Chargement…</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ METRICS VIEW ═══ -->
+  <div id="view-metrics" class="view flex-col overflow-hidden bg-canvas">
+    <div class="metrics-scroll p-5">
+      <div class="mb-5">
+        <h1 class="text-lg font-bold text-slate-900 mb-1">Métriques IA — Performance par question</h1>
+        <p class="text-sm text-slate-400">Analyse détaillée des scores RAG, confiance et qualité de génération</p>
+      </div>
+      <div class="grid grid-cols-4 gap-4 mb-5">
+        <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-brand-500 to-brand-300"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-3">Questions analysées</p><p class="text-3xl font-bold text-slate-900 font-mono" id="metrics-total-count">0</p></div>
+        <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 to-blue-300"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-3">Score global moyen</p><p class="text-3xl font-bold text-slate-900 font-mono" id="metrics-avg-score">—</p></div>
+        <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-green-500 to-green-300"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-3">Confiance moyenne</p><p class="text-3xl font-bold text-slate-900 font-mono" id="metrics-avg-conf">—</p></div>
+        <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-purple-500 to-purple-300"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-3">Latence moyenne</p><p class="text-3xl font-bold text-slate-900 font-mono" id="metrics-avg-lat">—</p></div>
+      </div>
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2 px-3 py-1.5 bg-brand-50 border border-brand-100 rounded-full">
+          <div class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></div>
+          <span class="text-xs font-semibold text-brand-700 font-mono">Live — métriques temps réel</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2 px-3 py-1.5 bg-green-50 border border-green-200 rounded-full">
+            <span class="text-xs text-green-600 font-mono">Score global moyen</span>
+            <strong class="text-sm font-bold text-green-700 font-mono" id="metrics-avg-score-val">—</strong>
+          </div>
+          <button onclick="fetchLiveMetrics()" class="text-xs font-mono px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-500 flex items-center gap-1.5 transition-colors">Actualiser</button>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden" id="metrics-list">
+        <div class="flex flex-col items-center justify-center gap-3 py-16 text-slate-400">
+          <p class="text-sm font-medium">Aucune métrique disponible</p>
+          <p class="text-xs font-mono text-slate-300">Posez des questions dans le chat pour voir les métriques IA</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ANALYSE BI VIEW ═══ -->
+  <div id="view-analyse" class="view bg-canvas">
+    <div class="p-5 max-w-screen-xl mx-auto w-full">
+      <div class="hidden items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl mb-4 text-sm text-amber-700" id="alert-box">
+        <svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        <span id="alert-txt"></span>
+      </div>
+      <div class="grid grid-cols-5 gap-3 mb-5">
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-brand-500"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Questions</p><p class="text-2xl font-bold text-slate-900 font-mono" id="k-total">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-purple-500"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Latence moy.</p><p class="text-2xl font-bold text-slate-900 font-mono" id="k-lat">—</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-green-500"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Satisfaction</p><p class="text-2xl font-bold text-slate-900 font-mono" id="k-sat">—</p><p class="text-xs text-slate-400 mt-1 font-mono" id="k-sat-s">feedback</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-amber-500"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Sans réponse</p><p class="text-2xl font-bold text-slate-900 font-mono" id="k-unans">—</p><p class="text-xs text-slate-400 mt-1 font-mono" id="k-unans-s">à traiter</p></div>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-card relative overflow-hidden"><div class="absolute top-0 left-0 right-0 h-0.5 bg-red-500"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">Dislikes</p><p class="text-2xl font-bold text-slate-900 font-mono" id="k-neg">—</p><p class="text-xs text-slate-400 mt-1 font-mono" id="k-neg-s">retours négatifs</p></div>
+      </div>
+      <div class="flex items-center gap-3 mb-3"><div class="w-1 h-4 bg-brand-600 rounded-full"></div><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Questions & Thèmes</span><div class="flex-1 h-px bg-slate-200"></div></div>
+      <div class="grid grid-cols-3 gap-4 mb-4">
+        <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Top 3 questions télécom</span><span class="text-xs font-mono text-slate-400" id="top5-sub">—</span></div>
+          <div class="p-4" id="top3-list"><div class="skel w-11/12"></div><div class="skel w-3/4"></div><div class="skel w-5/6"></div></div>
+        </div>
+        <div class="col-span-2 bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Thèmes les plus demandés</span><span class="text-xs font-mono text-slate-400" id="themes-sub">—</span></div>
+          <div class="p-4"><div style="position:relative;width:100%;height:180px;"><canvas id="c-themes"></canvas></div></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mb-3"><div class="w-1 h-4 bg-purple-500 rounded-full"></div><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Top 2 questions par thème</span><div class="flex-1 h-px bg-slate-200"></div></div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden mb-4">
+        <div class="px-4 py-3 border-b border-slate-100 bg-slate-50"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Top 2 — par thème détecté</span></div>
+        <div class="p-4"><div class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));" id="top2-grid"><div class="skel h-20"></div><div class="skel h-20"></div><div class="skel h-20"></div></div></div>
+      </div>
+      <div class="flex items-center gap-3 mb-3"><div class="w-1 h-4 bg-green-500 rounded-full"></div><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Feedback utilisateurs</span><div class="flex-1 h-px bg-slate-200"></div></div>
+      <div class="max-w-sm mb-4">
+        <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Satisfaction</span></div>
+          <div class="p-4 flex items-center gap-6"><div style="position:relative;width:110px;height:110px;flex-shrink:0;"><canvas id="c-sat"></canvas></div><div id="sat-leg" class="flex-1"></div></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mb-3"><div class="w-1 h-4 bg-red-500 rounded-full"></div><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Dislikes & RAG</span><div class="flex-1 h-px bg-slate-200"></div></div>
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Dislikes récents</span><button onclick="loadFeedback()" class="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-brand-600 transition-colors"><svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button></div>
+          <div class="p-3 scroll" id="dislikes-list"><p class="text-xs text-slate-400 text-center py-4 font-mono">Chargement...</p></div>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">RAG — Enrichissements admin</span><span class="text-xs font-bold text-green-600 font-mono" id="rag-n">—</span></div>
+          <div class="p-3 scroll" id="rag-list"><p class="text-xs text-slate-400 text-center py-4 font-mono">Chargement...</p></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mb-3"><div class="w-1 h-4 bg-brand-600 rounded-full"></div><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Métriques RAGAS — Évaluation</span><div class="flex-1 h-px bg-slate-200"></div></div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-card overflow-hidden mb-6">
+        <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between"><span class="text-xs font-bold text-slate-500 uppercase tracking-wider font-mono">Scores évaluation · Dataset v3 · 50 questions</span><span class="text-xs font-mono text-slate-500">Score global <strong class="text-green-600">0.946</strong> — Excellent</span></div>
+        <div class="p-5 grid grid-cols-2 gap-8"><div id="ragas-l"></div><div id="ragas-r"></div></div>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONSTANTES & UTILS
+// ═══════════════════════════════════════════════════════════════
+const SVG = {
+  thumbUp:  '<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017a2 2 0 01-.485-.06l-3.76-.94m-7-10h2a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2z"/></svg>',
+  thumbDown:'<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5"/></svg>',
+  speaker:  '<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072M12 6v12m0 0l-3-3m3 3l3-3"/></svg>',
+  bot:      '<img src="/static/logo.png" alt="TT" style="width:18px;height:18px;object-fit:contain;"/>',
+  edit:     '<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>',
+  trash:    '<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>',
+  rag:      '<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>',
+  spinner:  '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>',
+};
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+let _toastT=null;
+function showToast(msg,err){ var t=document.getElementById('toast'); t.textContent=msg; t.className=err?'show err':'show'; clearTimeout(_toastT); _toastT=setTimeout(()=>{t.className='';},3000); }
+function set(id,v){ var el=document.getElementById(id); if(el)el.innerHTML=v; }
+function $id(id){ return document.getElementById(id); }
+function hRow(l,v){ return '<div class="flex items-center justify-between px-3 py-2 bg-slate-50 rounded-lg border border-slate-100 mb-1.5"><span class="text-xs text-slate-500">'+l+'</span><span class="text-xs font-semibold font-mono text-slate-700">'+v+'</span></div>'; }
+function emptyState(msg){ return '<div class="flex items-center justify-center h-20 text-xs font-mono text-slate-400">'+msg+'</div>'; }
+function pill(text,cls){ return '<span class="text-xs px-2 py-0.5 rounded-full border font-mono font-semibold '+cls+'">'+text+'</span>'; }
+
+const API = 'http://localhost:8001';
+let token = localStorage.getItem('tt_token') || null;
+let currentUser = JSON.parse(localStorage.getItem('tt_user') || 'null');
+let pendingEmail = null;
+const DEMO_ADMIN = { email:'admin@tt.tn', password:'123456', user:{ name:'Admin TT', email:'admin@tt.tn', role:'admin' }, token:'demo-admin-token-tt-2024' };
+
+// ═══════════════════════════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════════════════════════
+function showStep(id){ document.querySelectorAll('.auth-step').forEach(s=>s.classList.remove('active')); document.getElementById(id).classList.add('active'); hideAuthErr(); }
+function showAuthErr(msg){ var el=$id('auth-err'); el.textContent=msg; el.classList.remove('hidden'); }
+function hideAuthErr(){ var el=$id('auth-err'); if(el) el.classList.add('hidden'); }
+function setFldErr(id,msg){ var e=$id(id+'-err'); if(e)e.textContent=msg; var i=$id(id); if(i)i.classList.add('err'); }
+function clrErr(id){ var e=$id(id+'-err'); if(e)e.textContent=''; var i=$id(id); if(i)i.classList.remove('err'); }
+
+async function authFetch(path,body){
+  if(path==='/auth/login'&&body.email===DEMO_ADMIN.email&&body.password===DEMO_ADMIN.password)
+    return {status:'ok',token:DEMO_ADMIN.token,user:DEMO_ADMIN.user};
+  var res=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  var data=await res.json(); if(!res.ok) throw new Error(data.detail||'Erreur serveur'); return data;
+}
+
+async function doLogin(){
+  var email=$id('login-email').value.trim().toLowerCase();
+  var pwd=$id('login-pwd').value;
+  var ok=true;
+  if(!email||!email.includes('@')){setFldErr('login-email','E-mail invalide');ok=false;}
+  if(!pwd){setFldErr('login-pwd','Mot de passe requis');ok=false;}
+  if(!ok) return;
+  var btn=$id('btn-login'); btn.disabled=true; btn.textContent='Connexion...';
+  try{
+    var data=await authFetch('/auth/login',{email,password:pwd});
+    if(data.status==='needs_verification'){pendingEmail=email;setVerifyUI(email,data.demo_code,data.email_sent===true);showStep('step-verify');}
+    else loginSuccess(data.token,data.user);
+  }catch(e){showAuthErr(e.message);}
+  finally{btn.disabled=false;btn.textContent='Se connecter';}
+}
+
+var _emailCheckTimer=null,_emailValid=false;
+function scheduleEmailCheck(email,immediate){ clearTimeout(_emailCheckTimer);_emailCheckTimer=setTimeout(()=>runEmailCheck(email),immediate?0:800);}
+function setEmailCheckUI(state,msg,score){
+  score=score||0;
+  var wrap=$id('reg-email-check'),msgEl=$id('reg-email-check-msg'),bar=$id('reg-score-bar'),bwrap=$id('reg-score-wrap');
+  if(!wrap)return;
+  wrap.style.display='flex';wrap.className='email-check '+state;msgEl.textContent=msg;
+  if(state!=='checking'){bwrap.classList.remove('hidden');var pct=Math.min(100,score);bar.style.width=pct+'%';bar.style.background=pct>=100?'#16a34a':pct>=75?'#2563eb':pct>=50?'#d97706':'#dc2626';}
+  else bwrap.classList.add('hidden');
+}
+async function runEmailCheck(email){
+  email=email.trim().toLowerCase();
+  if(!email){_emailValid=false;var w=$id('reg-email-check');if(w)w.style.display='none';$id('reg-score-wrap').classList.add('hidden');return;}
+  if(!email.includes('@')||!email.includes('.')){_emailValid=false;setEmailCheckUI('invalid','Format invalide',0);return;}
+  setEmailCheckUI('checking','Vérification…');
+  try{
+    var r=await fetch(API+'/auth/check-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+    var d=await r.json();
+    if(d.valid){_emailValid=true;setEmailCheckUI('valid','Adresse valide',d.score||100);}
+    else{_emailValid=false;setEmailCheckUI('invalid',d.reason||'Adresse invalide',d.score||0);}
+  }catch(e){_emailValid=true;setEmailCheckUI('warning','Vérification impossible',50);}
+}
+async function doRegister(){
+  var name=$id('reg-name').value.trim(),email=$id('reg-email').value.trim().toLowerCase(),pwd=$id('reg-pwd').value;
+  var ok=true;
+  if(!name){setFldErr('reg-name','Nom requis');ok=false;}
+  if(!email||!email.includes('@')){setFldErr('reg-email','E-mail invalide');ok=false;}
+  if(pwd.length<6){setFldErr('reg-pwd','Min. 6 caractères');ok=false;}
+  if(!ok)return;
+  var btn=$id('btn-register');btn.disabled=true;btn.textContent='Création...';
+  try{var data=await authFetch('/auth/register',{name,email,password:pwd});pendingEmail=email;setVerifyUI(email,data.demo_code,data.email_sent===true);showStep('step-verify');}
+  catch(e){showAuthErr(e.message);}
+  finally{btn.disabled=false;btn.textContent='Créer mon compte';}
+}
+async function doVerify(){
+  var code=''; for(var i=0;i<6;i++) code+=$id('d'+i).value;
+  if(code.length!==6){$id('verify-err').textContent='Entrez les 6 chiffres';return;}
+  var btn=$id('btn-verify');btn.disabled=true;btn.textContent='Vérification...';
+  try{var data=await authFetch('/auth/verify',{email:pendingEmail,code});loginSuccess(data.token,data.user);}
+  catch(e){$id('verify-err').textContent=e.message;}
+  finally{btn.disabled=false;btn.textContent='Valider';}
+}
+async function doResend(){
+  if(!pendingEmail)return;
+  try{var data=await authFetch('/auth/resend',{email:pendingEmail});setVerifyUI(pendingEmail,data.demo_code,data.email_sent===true);showToast('Nouveau code envoyé');}
+  catch(e){showAuthErr(e.message);}
+}
+function setVerifyUI(email,demoCode,emailSent){
+  $id('verify-email-display').textContent=email;
+  var db=$id('demo-code-block');
+  if(emailSent) db.classList.remove('show'); else{db.classList.add('show');$id('demo-code-val').textContent=demoCode||'——————';}
+  $id('verify-err').textContent='';
+  for(var i=0;i<6;i++) $id('d'+i).value='';
+  setTimeout(()=>$id('d0').focus(),100);
+}
+function codeInput(e,i){ e.target.value=e.target.value.replace(/\D/g,'').slice(-1); if(e.target.value&&i<5)$id('d'+(i+1)).focus(); var code='';for(var j=0;j<6;j++)code+=$id('d'+j).value; if(code.length===6)setTimeout(doVerify,80); }
+function codeKey(e,i){ if(e.key==='Backspace'&&!e.target.value&&i>0)$id('d'+(i-1)).focus(); if(e.key==='Enter')doVerify(); }
+function loginSuccess(tok,user){ token=tok;currentUser=user;localStorage.setItem('tt_token',tok);localStorage.setItem('tt_user',JSON.stringify(user));$id('auth-overlay').classList.add('hidden');initApp(); }
+async function doLogout(){ if(token&&token!==DEMO_ADMIN.token){try{await fetch(API+'/auth/logout',{method:'POST',headers:{Authorization:'Bearer '+token}});}catch(e){}} token=null;currentUser=null;localStorage.removeItem('tt_token');localStorage.removeItem('tt_user');closeDD();showStep('step-login');$id('auth-overlay').classList.remove('hidden'); }
+async function restoreSession(){
+  if(!token||!currentUser)return false;
+  if(token===DEMO_ADMIN.token){currentUser=DEMO_ADMIN.user;return true;}
+  try{
+    var ctrl=new AbortController();var tid=setTimeout(()=>ctrl.abort(),3000);
+    var res=await fetch(API+'/auth/me',{headers:{Authorization:'Bearer '+token},signal:ctrl.signal});
+    clearTimeout(tid);
+    if(res.ok){var u=await res.json();currentUser=u;localStorage.setItem('tt_user',JSON.stringify(u));return true;}
+    throw new Error();
+  }catch(e){if(e.name==='AbortError')return currentUser!==null;token=null;currentUser=null;localStorage.removeItem('tt_token');localStorage.removeItem('tt_user');return false;}
+}
+
+function toggleDD(){ $id('user-dd').classList.toggle('hidden'); }
+function closeDD(){ $id('user-dd').classList.add('hidden'); }
+document.addEventListener('click',e=>{ var m=$id('user-menu'); if(m&&!m.contains(e.target))closeDD(); });
+
+// ═══════════════════════════════════════════════════════════════
+// INIT APP
+// ═══════════════════════════════════════════════════════════════
+function initApp(){
+  var initials=currentUser.name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+  sessions=JSON.parse(localStorage.getItem('tt_sessions_'+currentUser.email)||'[]');
+  $id('user-av').textContent=initials;
+  $id('user-badge').textContent=currentUser.role==='admin'?'admin':'user';
+  $id('dd-name-h').textContent=currentUser.name;
+  $id('dd-name').textContent=currentUser.name;
+  $id('dd-email').textContent=currentUser.email;
+  if(currentUser.role==='admin'){
+    ['tab-admin','tab-metrics','tab-analyse'].forEach(id=>$id(id).classList.remove('hidden'));
+    ['dd-admin-link','dd-metrics-link'].forEach(id=>$id(id).classList.remove('hidden'));
+  }
+  showWelcomeMessage(); checkApi(); renderSessions();
+  if(sessions.length) loadSession(sessions[0].id); else newSession();
+  initSpeech();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WELCOME + CHAT
+// ═══════════════════════════════════════════════════════════════
+function showWelcomeMessage(){
+  $id('messages').innerHTML =
+    '<div class="flex flex-col items-center justify-center gap-4 p-12 text-center max-w-md mx-auto" id="welcome-msg">' +
+    '<div class="w-16 h-16 bg-white border border-slate-200 rounded-2xl flex items-center justify-center shadow-card">' +
+    '<img src="/static/logo.png" alt="TT" style="width:44px;height:44px;object-fit:contain;"/>' +
+    '</div>' +
+    '<div><h3 class="text-lg font-bold text-slate-900 mb-1">Bonjour, '+esc(currentUser.name.split(' ')[0])+'&nbsp;!</h3>' +
+    '<p class="text-sm text-slate-400 leading-relaxed max-w-xs">Assistant IA Tunisie Telecom — Pipeline RAG avec ChromaDB, NLP bilingue FR/AR et évaluation RAGAS.</p></div>' +
+    '<div class="flex items-center gap-2 px-4 py-2 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600 font-medium">' +
+    '<svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/></svg>' +
+    'Sélectionnez FR ou ع puis cliquez sur le micro</div></div>';
+  $id('suggestions').classList.remove('hidden');
+}
+function hideWelcome(){ var w=$id('welcome-msg'); if(w)w.remove(); $id('suggestions').classList.add('hidden'); }
+
+var apiOk=false;
+async function checkApi(){
+  var dot=$id('status-dot'),lbl=$id('status-label');
+  try{
+    var ctrl=new AbortController();setTimeout(()=>ctrl.abort(),4000);
+    var r=await fetch(API+'/health',{signal:ctrl.signal});
+    if(r.ok){apiOk=true;dot.className='status-dot online';lbl.textContent='api · online';}
+    else setApiOff();
+  }catch(e){setApiOff();}
+}
+function setApiOff(){ apiOk=false;$id('status-dot').className='status-dot offline';$id('status-label').textContent='api · offline'; }
+
+// ═══════════════════════════════════════════════════════════════
+// SPEECH
+// ═══════════════════════════════════════════════════════════════
+var recog=null,listening=false,vLang='fr-FR',silTimer=null,wasVoice=false,_speaking=false;
+function initSpeech(){
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){$id('btn-mic').disabled=true;return;}
+  recog=new SR();recog.continuous=true;recog.interimResults=true;recog.lang=vLang;
+  recog.onresult=function(e){
+    var interim='',finals='';
+    for(var i=e.resultIndex;i<e.results.length;i++){var t=e.results[i][0].transcript;if(e.results[i].isFinal)finals+=t+' ';else interim+=t;}
+    var ta=$id('chat-input');ta.value=(ta.dataset.committed||'')+finals+interim;autoResize(ta);
+    $id('vbar-transcript').textContent=(finals+interim).trim()?'"'+(finals+interim).slice(0,55)+'"':'';
+    if(finals){ta.dataset.committed=(ta.dataset.committed||'')+finals;clearTimeout(silTimer);silTimer=setTimeout(()=>{if(listening&&ta.value.trim()){stopMic();wasVoice=true;sendMessage();}},2000);}
+  };
+  recog.onstart=function(){
+    listening=true;
+    $id('btn-mic').classList.add('recording','bg-red-50','border-red-300');
+    var vb=$id('voice-bar');vb.classList.add('flex');vb.classList.remove('hidden');
+    $id('vbar-label').textContent=vLang.startsWith('ar')?'الاستماع جارٍ...':'Écoute en cours...';
+    var ta=$id('chat-input');ta.value='';ta.dataset.committed='';$id('vbar-transcript').textContent='';
+  };
+  recog.onend=function(){if(listening){try{recog.start();}catch(e){stopMic();}}};
+  recog.onerror=function(e){stopMic();var m={'not-allowed':'Permission microphone refusée.','no-speech':'Aucune parole détectée.'};if(m[e.error])showToast(m[e.error],true);};
+}
+function setVoiceLang(l){
+  vLang=l==='fr'?'fr-FR':'ar-SA';
+  var frBtn=$id('lang-fr'),arBtn=$id('lang-ar');
+  var ac='px-3 h-8 rounded-md text-xs font-bold font-mono text-brand-700 bg-white shadow-sm transition-all';
+  var ia='px-3 h-8 rounded-md text-xs font-bold font-mono text-slate-500 transition-all';
+  if(l==='fr'){frBtn.className=ac;arBtn.className=ia;}else{arBtn.className=ac;frBtn.className=ia;}
+  var ta=$id('chat-input');
+  if(l==='ar'){ta.placeholder='اكتب سؤالك هنا…';ta.dir='rtl';}else{ta.placeholder='Posez votre question…';ta.dir='ltr';}
+  if(recog)recog.lang=vLang;
+  showToast(l==='ar'?'Langue : عربي':'Langue : Français');
+}
+function toggleMic(){if(!recog)return;listening?stopMic():startMic();}
+function startMic(){if(!recog)return;recog.lang=vLang;try{recog.start();}catch(e){showToast('Erreur micro',true);}}
+function stopMic(){
+  listening=false;clearTimeout(silTimer);
+  var btn=$id('btn-mic');btn.classList.remove('recording','bg-red-50','border-red-300');
+  var vb=$id('voice-bar');vb.classList.remove('flex');vb.classList.add('hidden');
+  $id('vbar-transcript').textContent='';
+  if(recog){try{recog.stop();}catch(e){}}
+}
+function speakText(msgId){
+  if(!window.speechSynthesis){showToast('TTS non supporté',true);return;}
+  if(_speaking){window.speechSynthesis.cancel();_speaking=false;return;}
+  var bubble=document.getElementById('bubble-'+msgId);
+  if(!bubble)return;
+  var text=bubble.innerText||bubble.textContent;
+  if(!text||text.trim().length<3)return;
+  var isAr=/[\u0600-\u06FF]/.test(text);
+  var utter=new SpeechSynthesisUtterance(text);
+  utter.lang=isAr?'ar-SA':'fr-FR';utter.rate=0.95;
+  utter.onstart=()=>_speaking=true;
+  utter.onend=utter.onerror=()=>_speaking=false;
+  window.speechSynthesis.speak(utter);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SESSIONS
+// ═══════════════════════════════════════════════════════════════
+var MAX_MSGS=60;
+function msgKey(sid){return 'tt_msgs_'+(currentUser&&currentUser.email)+'_'+sid;}
+function saveMsgs(sid){
+  if(!sid||!currentUser)return;
+  var msgs=$id('messages');if(!msgs)return;
+  var items=msgs.querySelectorAll('.msg-item');var saved=[];
+  items.forEach(el=>{
+    var role=el.classList.contains('user-msg')?'user':'bot';
+    var bubble=el.querySelector('.msg-bubble');
+    if(!bubble)return;
+    var text=(bubble.innerText||bubble.textContent||'').trim();
+    if(text)saved.push({role,text});
+  });
+  try{localStorage.setItem(msgKey(sid),JSON.stringify(saved.slice(-MAX_MSGS)));}catch(e){}
+}
+function loadMsgs(sid){
+  if(!sid||!currentUser)return false;
+  try{
+    var raw=localStorage.getItem(msgKey(sid));if(!raw)return false;
+    var msgs=JSON.parse(raw);if(!msgs||!msgs.length)return false;
+    hideWelcome();msgs.forEach(m=>addMsgToDOM(m.role,m.text));
+    var el=$id('messages');if(el)el.scrollTop=el.scrollHeight;return true;
+  }catch(e){return false;}
+}
+function clearMsgs(sid){if(!sid||!currentUser)return;try{localStorage.removeItem(msgKey(sid));}catch(e){}}
+
+var sessions=[],currentSid=null,busy=false,_activeSid=null;
+function newSession(){
+  var sid=crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
+  sessions.unshift({id:sid,name:'Session '+(sessions.length+1),ts:new Date().toLocaleTimeString('fr-FR')});
+  saveSess();renderSessions();loadSession(sid);
+}
+function loadSession(sid){
+  currentSid=sid;$id('session-label').textContent=sid.substring(0,8)+'…';renderSessions();
+  if(_activeSid!==sid){_activeSid=sid;clearMessages();var loaded=loadMsgs(sid);if(!loaded&&apiOk)fetchHistory(sid);}
+}
+function clearMessages(){ $id('messages').innerHTML='';showWelcomeMessage(); }
+function renameSession(sid,newName){var trimmed=newName.trim();if(!trimmed)return;var s=sessions.find(s=>s.id===sid);if(s){s.name=trimmed;saveSess();renderSessions();showToast('Session renommée');}}
+function startRename(sid,e){
+  e.stopPropagation();
+  var items=document.querySelectorAll('.session-item');var nameEl=null;
+  items.forEach(el=>{if(el.dataset.sid===sid)nameEl=el.querySelector('.session-item-name');});
+  if(!nameEl)return;
+  var current=(sessions.find(s=>s.id===sid)||{}).name||'';
+  var input=document.createElement('input');input.className='session-rename-input';input.value=current;
+  input.onclick=ev=>ev.stopPropagation();
+  input.onkeydown=ev=>{if(ev.key==='Enter'){renameSession(sid,input.value);input.blur();}if(ev.key==='Escape')renderSessions();ev.stopPropagation();};
+  input.onblur=()=>renameSession(sid,input.value);
+  nameEl.replaceWith(input);input.focus();input.select();
+}
+function renderSessions(){
+  $id('session-list').innerHTML=sessions.map(s=>{
+    var active=s.id===currentSid;
+    return '<div class="session-item '+(active?'active':'')+'" data-sid="'+s.id+'" onclick="loadSession(\''+s.id+'\')">'+
+      '<div class="session-item-name text-sm font-medium '+(active?'text-brand-700':'text-slate-700')+' pr-6 truncate">'+esc(s.name)+'</div>'+
+      '<div class="text-xs font-mono text-slate-400 mt-0.5">'+s.ts+'</div>'+
+      '<button class="session-rename-btn" onclick="startRename(\''+s.id+'\',event)" title="Renommer">'+SVG.edit+'</button>'+
+    '</div>';
+  }).join('');
+}
+function saveSess(){if(!currentUser)return;localStorage.setItem('tt_sessions_'+currentUser.email,JSON.stringify(sessions.slice(0,20)));}
+async function fetchHistory(sid){
+  try{
+    var r=await fetch(API+'/history/'+sid,{headers:{Authorization:'Bearer '+(token||'')}});
+    if(!r.ok)return;var h=await r.json();if(!h.length)return;if(currentSid!==sid)return;
+    hideWelcome();for(var i=0;i<h.length;i+=2){if(h[i])addMsgToDOM('user',h[i].content);if(h[i+1])addMsgToDOM('bot',h[i+1].content);}saveMsgs(sid);
+  }catch(e){}
+}
+async function clearCurrentSession(){
+  if(!currentSid)return;
+  if(apiOk){try{await fetch(API+'/history/'+currentSid,{method:'DELETE',headers:{Authorization:'Bearer '+(token||'')}});}catch(e){}}
+  clearMsgs(currentSid);_activeSid=null;clearMessages();showToast('Historique effacé');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MESSAGES DOM
+// ═══════════════════════════════════════════════════════════════
+var _msgId=0,_lastUserMsg='';
+function addMsgToDOM(role,text,sources,ragUsed,ms,isVoice){
+  if(!text||!text.trim())return;
+  sources=sources||[];ragUsed=ragUsed||false;ms=ms||0;isVoice=isVoice||false;
+  if(role==='user')_lastUserMsg=text;
+  var msgs=$id('messages');
+  var isBot=role==='bot';
+  var isAr=/[\u0600-\u06FF]/.test(text);
+  var msgId=isBot?'msg-'+(++_msgId):null;
+  var initials=currentUser&&currentUser.name?currentUser.name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase():'U';
+  var time=new Date().toLocaleTimeString('fr-FR');
+  var tags='';
+  if(!isBot){tags+=isAr?pill('AR','bg-amber-50 text-amber-600 border-amber-200'):pill('FR','bg-brand-50 text-brand-600 border-brand-200');}
+  var metaHtml='<span class="text-xs font-mono text-slate-400">'+time+'</span>';
+  if(ms>0)metaHtml+='<span class="text-xs font-mono text-slate-400">'+ms+'ms</span>';
+  if(tags)metaHtml+=tags;
+  var fbHtml='';
+  if(isBot){
+    fbHtml='<div class="flex items-center gap-1.5 mt-2 pt-2 border-t border-slate-100" id="fb-row-'+msgId+'">'+
+      '<button class="fb-btn speak" onclick="speakText(\''+msgId+'\')">'+SVG.speaker+' Lire</button>'+
+      '<button class="fb-btn up" onclick="sendFeedback(\''+msgId+'\',1)">'+SVG.thumbUp+'</button>'+
+      '<button class="fb-btn down" onclick="sendFeedback(\''+msgId+'\',-1)">'+SVG.thumbDown+'</button>'+
+      '<span class="text-xs font-mono text-slate-400 ml-1" id="fb-thanks-'+msgId+'"></span>'+
+    '</div>';
+  }
+  var avatarHtml=isBot
+    ?'<div class="flex-shrink-0 w-8 h-8 rounded-xl bg-white border border-slate-200 flex items-center justify-center">'+SVG.bot+'</div>'
+    :'<div class="flex-shrink-0 w-8 h-8 rounded-xl bg-gradient-to-br from-brand-600 to-brand-400 text-white flex items-center justify-center text-xs font-bold">'+initials+'</div>';
+  var bubbleCls=isBot?'bg-white border border-slate-200 text-slate-800 rounded-2xl rounded-tl-sm shadow-card':'bg-brand-600 text-white rounded-2xl rounded-tr-sm';
+  var dirAttr=isAr&&!isBot?' dir="rtl"':'';
+  var el=document.createElement('div');
+  el.className='msg-item '+(isBot?'bot-msg':'user-msg')+' flex gap-2.5';
+  el.style.animation='msgIn .18s ease-out';
+  if(isBot){
+    el.innerHTML=avatarHtml+
+      '<div class="msg-body" style="max-width:72%;min-width:0;">'+
+        '<div class="msg-bubble px-4 py-3 text-sm leading-relaxed '+bubbleCls+'" id="bubble-'+msgId+'"'+dirAttr+'>'+esc(text)+'</div>'+
+        '<div class="flex items-center gap-2 mt-1.5 flex-wrap">'+metaHtml+'</div>'+
+        fbHtml+
+      '</div>';
+  }else{
+    el.innerHTML=
+      '<div class="msg-body" style="max-width:72%;min-width:0;">'+
+        '<div class="msg-bubble px-4 py-3 text-sm leading-relaxed '+bubbleCls+'"'+dirAttr+'>'+esc(text)+'</div>'+
+        '<div class="flex items-center gap-2 mt-1.5 flex-wrap justify-end">'+metaHtml+'</div>'+
+      '</div>'+avatarHtml;
+  }
+  msgs.appendChild(el);
+  requestAnimationFrame(()=>msgs.scrollTop=msgs.scrollHeight);
+}
+function addMsg(role,text,sources,ragUsed,ms,isVoice){hideWelcome();addMsgToDOM(role,text,sources,ragUsed,ms,isVoice);saveMsgs(currentSid);}
+function showTyping(){
+  hideWelcome();var msgs=$id('messages');
+  var ex=$id('typing-ind');if(ex)ex.remove();
+  var el=document.createElement('div');el.id='typing-ind';el.className='flex gap-2.5';el.style.animation='msgIn .18s ease-out';
+  el.innerHTML='<div class="flex-shrink-0 w-8 h-8 rounded-xl bg-white border border-slate-200 flex items-center justify-center">'+SVG.bot+'</div>'+
+    '<div class="msg-body"><div class="inline-flex items-center gap-1 px-4 py-3 bg-white border border-slate-200 rounded-2xl rounded-tl-sm shadow-card">'+
+    '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>'+
+    '<p class="text-xs font-mono text-slate-400 mt-1.5">Pipeline RAG en cours…</p></div>';
+  msgs.appendChild(el);requestAnimationFrame(()=>msgs.scrollTop=msgs.scrollHeight);
+}
+function removeTyping(){var t=$id('typing-ind');if(t)t.remove();}
+
+// ═══════════════════════════════════════════════════════════════
+// FEEDBACK
+// ═══════════════════════════════════════════════════════════════
+var _fbPending=null;
+async function sendFeedback(msgId,rating){
+  var row=$id('fb-row-'+msgId);if(!row)return;
+  var thanks=$id('fb-thanks-'+msgId);
+  if(rating===1){
+    row.querySelectorAll('.fb-btn.up,.fb-btn.down').forEach(b=>{b.disabled=true;b.onclick=null;});
+    row.querySelector('.fb-btn.up').classList.add('voted');
+    if(thanks)thanks.textContent='Merci !';
+    showToast('Merci pour votre retour');
+    await postFeedback(msgId,1,'','','');
+  }else{
+    var bubble=$id('bubble-'+msgId);
+    var botAnswer=bubble?(bubble.innerText||'').trim():'';
+    _fbPending={msgId,rating:-1,userQuestion:_lastUserMsg,botAnswer};
+    $id('fb-comment').value='';
+    var qb=$id('fb-question-box'),qt=$id('fb-question-text');
+    if(_lastUserMsg.trim()){qt.textContent=_lastUserMsg;qb.classList.remove('hidden');}else qb.classList.add('hidden');
+    var bb=$id('fb-bot-box'),bt=$id('fb-bot-text');
+    if(bb&&bt){if(botAnswer){bt.textContent=botAnswer.substring(0,200)+(botAnswer.length>200?'…':'');bb.classList.remove('hidden');}else bb.classList.add('hidden');}
+    var popup=$id('fb-popup');popup.classList.remove('hidden');popup.classList.add('flex');
+    setTimeout(()=>$id('fb-comment').focus(),100);
+  }
+}
+function closeFbPopup(){
+  var popup=$id('fb-popup');popup.classList.add('hidden');popup.classList.remove('flex');
+  if(_fbPending){
+    var row=$id('fb-row-'+_fbPending.msgId);
+    if(row){row.querySelectorAll('.fb-btn.up,.fb-btn.down').forEach(b=>{b.disabled=true;b.onclick=null;});var db=row.querySelector('.fb-btn.down');if(db)db.classList.add('voted');var t=$id('fb-thanks-'+_fbPending.msgId);if(t)t.textContent='Noté';}
+    postFeedback(_fbPending.msgId,_fbPending.rating,'',_fbPending.userQuestion||'',_fbPending.botAnswer||'');
+    _fbPending=null;
+  }
+}
+async function submitFbComment(){var comment=$id('fb-comment').value.trim();closeFbPopup();if(_fbPending){var t=$id('fb-thanks-'+_fbPending.msgId);if(t)t.textContent='Merci';await postFeedback(_fbPending.msgId,_fbPending.rating,comment,_fbPending.userQuestion||'',_fbPending.botAnswer||'');showToast('Retour enregistré');_fbPending=null;}}
+document.addEventListener('click',e=>{var p=$id('fb-popup');if(p&&!p.classList.contains('hidden')&&e.target===p)closeFbPopup();});
+async function postFeedback(msgId,rating,comment,uq,ba){
+  if(!apiOk)return;
+  try{await fetch(API+'/feedback',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(token||'')},body:JSON.stringify({session_id:currentSid,msg_id:msgId,rating,comment,user_question:uq||'',bot_answer:ba||'',timestamp:new Date().toISOString()})});}catch(e){}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RAG MODAL
+// ═══════════════════════════════════════════════════════════════
+var _ragId=null;
+function openRagModal(uid,question){
+  _ragId=uid;$id('rag-question').value=question||'';$id('rag-answer').value='';$id('rag-theme').value='enrichissement_admin';
+  var qp=$id('rag-q-preview'),qw=$id('rag-q-preview-wrap');
+  if(question&&question.trim()){qp.textContent=question;qw.classList.remove('hidden');}else qw.classList.add('hidden');
+  $id('rag-alert').className='hidden mb-3 px-3 py-2.5 rounded-lg text-sm';$id('rag-submit-btn').disabled=false;
+  var modal=$id('rag-modal');modal.classList.remove('hidden');modal.classList.add('flex');
+  setTimeout(()=>$id('rag-answer').focus(),100);
+}
+function closeRagModal(){var modal=$id('rag-modal');modal.classList.add('hidden');modal.classList.remove('flex');_ragId=null;}
+$id('rag-modal').addEventListener('click',function(e){if(e.target===this)closeRagModal();});
+async function submitRag(){
+  var question=$id('rag-question').value.trim(),answer=$id('rag-answer').value.trim(),theme=$id('rag-theme').value;
+  var alertEl=$id('rag-alert');
+  function setAlert(type,msg){alertEl.className=(type==='success'?'bg-green-50 border border-green-200 text-green-700':'bg-red-50 border border-red-200 text-red-700')+' block mb-3 px-3 py-2.5 rounded-lg text-sm';alertEl.textContent=msg;}
+  if(!question){setAlert('error','La question est obligatoire.');return;}
+  if(!answer){setAlert('error','La réponse est obligatoire.');return;}
+  var btn=$id('rag-submit-btn');btn.disabled=true;btn.textContent='Ajout en cours...';
+  try{
+    var body={question,answer,theme};if(_ragId)body.unanswered_id=_ragId;
+    var r=await fetch(API+'/admin/rag/add',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(token||'')},body:JSON.stringify(body)});
+    var d=await r.json();if(!r.ok)throw new Error(d.detail||'Erreur');
+    setAlert('success','Ajouté — '+d.n_chunks+' chunks');
+    if(_ragId){var qi=$id('uq-'+_ragId);if(qi)qi.remove();}
+    $id('stat-chunks').textContent=d.n_chunks||'—';
+    showToast('RAG enrichi');
+    setTimeout(()=>{closeRagModal();loadRagEntries();},1200);
+  }catch(e){setAlert('error',e.message);}
+  finally{btn.disabled=false;btn.textContent='Ajouter au RAG';}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SEND MESSAGE
+// ═══════════════════════════════════════════════════════════════
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendMessage();}}
+function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,110)+'px';}
+function setLoading(v){busy=v;['btn-send','chat-input','btn-mic'].forEach(id=>{var el=$id(id);if(el)el.disabled=v;});}
+function useSugg(btn){var t=btn.textContent;if(/[\u0600-\u06FF]/.test(t))setVoiceLang('ar');$id('chat-input').value=t;sendMessage();}
+async function sendMessage(){
+  if(busy)return;
+  var inp=$id('chat-input');var text=inp.value.trim();if(!text)return;
+  var iv=wasVoice;wasVoice=false;if(listening)stopMic();
+  inp.value='';inp.dataset.committed='';autoResize(inp);
+  addMsg('user',text,[],false,0,iv);showTyping();setLoading(true);
+  if(!apiOk){
+    await new Promise(r=>setTimeout(r,400));
+    removeTyping();addMsg('bot','API non connectée. Lancez : python src\\api_tinyllama.py');setLoading(false);return;
+  }
+  var ctrl=new AbortController();var tid=setTimeout(()=>ctrl.abort(),120000);
+  try{
+    var res=await fetch(API+'/chat',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(token||'')},body:JSON.stringify({message:text,session_id:currentSid}),signal:ctrl.signal});
+    clearTimeout(tid);if(!res.ok)throw new Error('HTTP '+res.status);
+    var d=await res.json();removeTyping();
+    addMsg('bot',d.answer,d.sources||[],d.rag_used||false,d.response_time_ms||0);
+    if(d.metrics)pushLiveMetric(text,d.answer,d.metrics);
+  }catch(e){
+    clearTimeout(tid);removeTyping();
+    if(e.name==='AbortError')addMsg('bot','Timeout — réessayez.');
+    else{apiOk=false;setApiOff();addMsg('bot','Erreur : '+e.message);}
+  }
+  finally{setLoading(false);}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SWITCH VIEW
+// ═══════════════════════════════════════════════════════════════
+var _liveAutoRefresh=null;
+function switchView(view,btn){
+  if(['admin','metrics','analyse'].indexOf(view)>=0&&currentUser&&currentUser.role!=='admin'){showToast('Accès réservé aux administrateurs',true);return;}
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  $id('view-'+view).classList.add('active');
+  if(btn)btn.classList.add('active');
+  if(view==='admin'){loadHealth();loadUnanswered();loadFeedbackStats();loadRagEntries();}
+  if(view==='metrics'){refreshMetricsView();if(_liveAutoRefresh)clearInterval(_liveAutoRefresh);_liveAutoRefresh=setInterval(()=>{if($id('view-metrics')&&$id('view-metrics').classList.contains('active'))refreshMetricsView();},10000);}
+  if(view==='analyse')setTimeout(()=>initBIDashboard(),150);
+  closeDD();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ADMIN
+// ═══════════════════════════════════════════════════════════════
+async function loadHealth(){
+  var panel=$id('health-panel');
+  if(!apiOk){panel.innerHTML=emptyState('API hors ligne');return;}
+  try{
+    var d=await(await fetch(API+'/health',{headers:{Authorization:'Bearer '+(token||'')}})).json();
+    $id('stat-messages').textContent=d.total_messages!=null?d.total_messages:'—';
+    $id('stat-sessions').textContent=d.total_sessions!=null?d.total_sessions:'—';
+    $id('stat-unanswered').textContent=d.unanswered_logged!=null?d.unanswered_logged:'—';
+    $id('stat-chunks').textContent=d.rag_chunks!=null?d.rag_chunks:'—';
+    var sc=d.status==='ok'?'<span class="text-green-600 font-semibold">'+d.status+'</span>':'<span class="text-amber-500 font-semibold">'+d.status+'</span>';
+    panel.innerHTML=hRow('Statut',sc)+hRow('Mode',d.mode||'extractive')+hRow('Chunks RAG',d.rag_chunks)+hRow('Messages',d.total_messages)+hRow('Sessions',d.total_sessions)+hRow('Auth','SQLite')+hRow('Feedback','Actif');
+  }catch(e){panel.innerHTML=emptyState('Erreur chargement');}
+}
+
+function buildLogRow(id,question,badge,badgeCls,extraHtml){
+  return '<div class="p-3 rounded-xl border border-slate-100 hover:bg-slate-50 mb-2 transition-colors"'+(id?' id="'+id+'"':'')+'>'+
+    '<div class="flex items-start gap-2 justify-between">'+
+      '<p class="text-sm text-slate-700 flex-1 leading-snug">'+esc(question)+'</p>'+
+      '<span class="text-xs font-bold px-2 py-0.5 rounded-full font-mono flex-shrink-0 '+badgeCls+'">'+badge+'</span>'+
+    '</div>'+extraHtml+'</div>';
+}
+
+async function loadUnanswered(){
+  var list=$id('unanswered-list'),reason=$id('filter-reason').value;
+  if(!apiOk){list.innerHTML=emptyState('API hors ligne');return;}
+  list.innerHTML=emptyState('Chargement…');
+  try{
+    var url=API+'/logs/unanswered?limit=100';
+    if(reason==='telecom_sans_reponse')url+='&telecom_only=1';else if(reason)url+='&reason='+encodeURIComponent(reason);
+    var d=await(await fetch(url,{headers:{Authorization:'Bearer '+(token||'')}})).json();
+    if(!d.length){list.innerHTML=emptyState('Aucune question trouvée');return;}
+    var rl={hors_sujet:'Hors sujet',confiance_faible:'Confiance faible',hallucination_detectee:'Hallucination'};
+    list.innerHTML=d.map(item=>{
+      var badgeCls=item.is_telecom?'bg-brand-50 text-brand-700 border border-brand-200':'bg-amber-50 text-amber-700 border border-amber-200';
+      var badgeText=item.is_telecom?'Télécom':(rl[item.reason]||item.reason);
+      var extra='<p class="text-xs font-mono text-slate-400 mt-1.5">'+new Date(item.timestamp).toLocaleString('fr-FR')+'</p>';
+      if(item.is_telecom||item.reason==='confiance_faible')extra+='<button class="mt-2 text-xs font-semibold px-3 py-1 rounded-lg border border-brand-300 text-brand-600 hover:bg-brand-50 transition-colors inline-flex items-center gap-1" onclick="openRagModal('+item.id+',\''+esc(item.question).replace(/'/g,"\\'")+'\')">'+SVG.rag+' Ajouter au RAG</button>';
+      return buildLogRow('uq-'+item.id,item.question,badgeText,badgeCls,extra);
+    }).join('');
+  }catch(e){list.innerHTML=emptyState('Erreur');}
+}
+
+async function loadFeedbackStats(){
+  var panel=$id('feedback-panel'),satPanel=$id('sat-panel');
+  if(!apiOk){if(panel)panel.innerHTML=emptyState('API hors ligne');return;}
+  try{
+    var d=await(await fetch(API+'/feedback/stats',{headers:{Authorization:'Bearer '+(token||'')}})).json();
+    var pos=d.positive||0,neg=d.negative||0,total=pos+neg,rate=total>0?Math.round(100*pos/total):0;
+    $id('stat-satisfaction').textContent=total>0?rate+'%':'—';
+    var bar=$id('sat-bar');if(bar){bar.style.width=rate+'%';bar.style.background=rate>=70?'#16a34a':rate>=40?'#d97706':'#dc2626';}
+    if(satPanel)satPanel.innerHTML=hRow('Positifs','<span class="text-green-600">'+pos+'</span>')+hRow('Négatifs','<span class="text-red-500">'+neg+'</span>')+hRow('Total',total)+hRow('Satisfaction','<strong>'+(total>0?rate+'%':'—')+'</strong>');
+    if(panel){
+      if(d.recent_negative&&d.recent_negative.length){
+        panel.innerHTML=d.recent_negative.map(f=>{
+          var extra='<p class="text-xs font-mono text-slate-400 mt-1.5">'+new Date(f.timestamp).toLocaleString('fr-FR')+'</p>';
+          if(f.user_question)extra+='<button class="mt-2 text-xs font-semibold px-3 py-1 rounded-lg border border-brand-300 text-brand-600 hover:bg-brand-50 transition-colors inline-flex items-center gap-1" onclick="openRagModal(null,\''+esc(f.user_question).replace(/'/g,"\\'")+'\')">'+SVG.rag+' Corriger RAG</button>';
+          return buildLogRow('',f.comment||'(pas de commentaire)','Dislike','bg-red-50 text-red-600 border border-red-200',extra);
+        }).join('');
+      }else panel.innerHTML=emptyState('Aucun retour négatif');
+    }
+  }catch(e){if(panel)panel.innerHTML=emptyState('Erreur');}
+}
+
+async function loadRagEntries(){
+  var panel=$id('rag-entries-panel');
+  if(!apiOk){panel.innerHTML=emptyState('API hors ligne');return;}
+  try{
+    var r=await fetch(API+'/admin/rag/entries',{headers:{Authorization:'Bearer '+(token||'')}});
+    if(!r.ok)throw new Error();
+    var d=await r.json();
+    if(!d.entries||!d.entries.length){panel.innerHTML=emptyState('Aucun enrichissement ajouté');return;}
+    panel.innerHTML=d.entries.map(e=>{
+      return '<div class="rag-entry-item" id="rentry-'+e.chunk_id+'">'+
+        '<p class="text-sm font-medium text-slate-800 mb-1">'+esc(e.question)+'</p>'+
+        '<p class="text-xs text-slate-500 border-l-2 border-brand-300 pl-2 mb-2">'+esc(e.answer.substring(0,120))+(e.answer.length>120?'…':'')+'</p>'+
+        '<div class="flex items-center justify-between">'+
+          '<span class="text-xs font-mono text-slate-400">'+new Date(e.timestamp).toLocaleString('fr-FR')+'</span>'+
+          '<button onclick="deleteRagEntry(\''+e.chunk_id+'\')" class="text-xs px-2.5 py-1 rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition-colors inline-flex items-center gap-1">'+SVG.trash+' Suppr.</button>'+
+        '</div></div>';
+    }).join('');
+  }catch(e){panel.innerHTML=emptyState('Erreur');}
+}
+
+async function deleteRagEntry(chunkId){
+  if(!confirm('Supprimer cette entrée du RAG ?'))return;
+  try{
+    var r=await fetch(API+'/admin/rag/delete/'+chunkId,{method:'DELETE',headers:{Authorization:'Bearer '+(token||'')}});
+    if(!r.ok)throw new Error();
+    var el=$id('rentry-'+chunkId);if(el)el.remove();
+    showToast('Entrée supprimée du RAG');loadHealth();
+  }catch(e){showToast('Erreur suppression',true);}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LIVE METRICS
+// ═══════════════════════════════════════════════════════════════
+var _liveMetrics=[];
+function mColorCls(v,g,w){g=g||.70;w=w||.50;return v>=g?'text-green-600':v>=w?'text-amber-500':'text-red-500';}
+function confCls(conf){return conf>=.75?'bg-green-50 text-green-700 border-green-200':conf>=.5?'bg-amber-50 text-amber-700 border-amber-200':'bg-red-50 text-red-600 border-red-200';}
+function scoreCls(gs){return gs>=.85?'bg-green-50 text-green-700 border-green-200':gs>=.7?'bg-amber-50 text-amber-700 border-amber-200':'bg-red-50 text-red-600 border-red-200';}
+
+function renderMetricItem(item,isNew){
+  var m=item.metrics||{},rag=m.rag||{},gen=m.generation||{};
+  var gs=m.global_score!=null?m.global_score:0,conf=m.confidence!=null?m.confidence:0;
+  var ts=new Date(item.timestamp).toLocaleTimeString('fr-FR');
+  var previewHtml=item.answer_preview?'<p class="text-xs text-slate-400 italic mb-3 pl-3 border-l-2 border-slate-200">'+esc(item.answer_preview.substring(0,100))+(item.answer_preview.length>100?'…':'')+'</p>':'';
+  return '<div class="p-5 border-b border-slate-100 hover:bg-slate-50 transition-colors'+(isNew?' new-metric':'')+'">'+
+    '<div class="flex items-start justify-between gap-3 mb-2"><p class="text-sm font-semibold text-slate-900 flex-1">'+esc(item.question||'—')+'</p><span class="text-xs font-mono text-slate-400 flex-shrink-0">'+ts+'</span></div>'+
+    previewHtml+
+    '<div class="grid grid-cols-4 gap-3 mb-3">'+
+      '<div class="text-center"><p class="text-xs font-mono text-slate-400 mb-1">Score global</p><p class="text-sm font-bold font-mono '+mColorCls(gs,.70,.55)+'">'+gs.toFixed(3)+'</p></div>'+
+      '<div class="text-center"><p class="text-xs font-mono text-slate-400 mb-1">Hit Rate</p><p class="text-sm font-bold font-mono text-slate-700">'+(rag.hit_rate||0).toFixed(3)+'</p></div>'+
+      '<div class="text-center"><p class="text-xs font-mono text-slate-400 mb-1">ROUGE-L</p><p class="text-sm font-bold font-mono text-slate-700">'+(gen.rouge_l||0).toFixed(3)+'</p></div>'+
+      '<div class="text-center"><p class="text-xs font-mono text-slate-400 mb-1">Latence</p><p class="text-sm font-bold font-mono text-slate-700">'+(m.latency_ms||0)+'ms</p></div>'+
+    '</div>'+
+    '<div class="flex gap-2 flex-wrap pt-2 border-t border-slate-100">'+pill('Confiance '+(conf*100).toFixed(0)+'%',confCls(conf))+pill(m.rag_used?'RAG actif':'Sans RAG',m.rag_used?'bg-brand-50 text-brand-700 border-brand-200':'bg-slate-50 text-slate-500 border-slate-200')+pill('Score '+gs.toFixed(3),scoreCls(gs))+'</div>'+
+    '<p class="text-xs font-mono text-slate-400 mt-2 text-right">'+new Date(item.timestamp).toLocaleString('fr-FR')+'</p></div>';
+}
+function renderMetricsList(items,highlightFirst){
+  var c=$id('metrics-list');
+  if(!items.length){c.innerHTML='<div class="flex flex-col items-center justify-center gap-3 py-16 text-slate-400"><p class="text-sm font-medium">Aucune métrique disponible</p><p class="text-xs font-mono text-slate-300">Posez des questions dans le chat</p></div>';return;}
+  c.innerHTML=items.map((item,i)=>renderMetricItem(item,highlightFirst&&i===0)).join('');
+}
+function updateMetricsKPI(){
+  var scores=_liveMetrics.map(m=>m.metrics&&m.metrics.global_score).filter(v=>v!=null);
+  var confs=_liveMetrics.map(m=>m.metrics&&m.metrics.confidence).filter(v=>v!=null);
+  var lats=_liveMetrics.map(m=>m.metrics&&m.metrics.latency_ms).filter(v=>v!=null);
+  function avg(arr){return arr.length?arr.reduce((a,b)=>a+b,0)/arr.length:null;}
+  var avgScore=avg(scores),avgConf=avg(confs),avgLat=lats.length?Math.round(avg(lats)):null;
+  set('metrics-total-count',_liveMetrics.length);
+  set('metrics-avg-score',avgScore?avgScore.toFixed(3):'—');
+  set('metrics-avg-conf',avgConf?(avgConf*100).toFixed(0)+'%':'—');
+  set('metrics-avg-lat',avgLat?avgLat+'ms':'—');
+  set('metrics-avg-score-val',avgScore?avgScore.toFixed(3):'—');
+}
+function refreshMetricsView(){fetchLiveMetrics();updateMetricsKPI();}
+function pushLiveMetric(q,ap,metrics){
+  if(!metrics)return;
+  _liveMetrics.unshift({question:q,answer_preview:ap,metrics,timestamp:new Date().toISOString()});
+  if(_liveMetrics.length>50)_liveMetrics=_liveMetrics.slice(0,50);
+  if($id('view-metrics')&&$id('view-metrics').classList.contains('active')){renderMetricsList(_liveMetrics,true);updateMetricsKPI();}
+}
+async function fetchLiveMetrics(){
+  if(!apiOk){renderMetricsList([]);return;}
+  try{
+    var r=await fetch(API+'/admin/metrics/live?limit=50',{headers:{Authorization:'Bearer '+(token||'')}});
+    if(!r.ok)throw new Error();
+    var d=await r.json();
+    if(d.history&&d.history.length){
+      var existing=new Set(_liveMetrics.map(i=>i.timestamp));
+      _liveMetrics=d.history.filter(i=>!existing.has(i.timestamp)).concat(_liveMetrics).slice(0,50);
+    }
+    renderMetricsList(_liveMetrics);updateMetricsKPI();
+  }catch(e){renderMetricsList(_liveMetrics);}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ANALYSE BI
+// ═══════════════════════════════════════════════════════════════
+var cThemes=null,cSat=null;
+var PALETTE=['#1d4ed8','#7c3aed','#059669','#d97706','#dc2626','#0891b2','#db2777'];
+var RANK_C=['#1d4ed8','#7c3aed','#059669','#d97706','#dc2626'];
+var RANK_BG=['#eff6ff','#f5f3ff','#ecfdf5','#fffbeb','#fef2f2'];
+var R_LEFT=[{n:'Hit Rate@K',v:0.978,c:'#1d4ed8'},{n:'MRR',v:0.978,c:'#1d4ed8'},{n:'Precision@K',v:0.644,c:'#7c3aed'},{n:'Ctx Relevance',v:1.000,c:'#059669'}];
+var R_RIGHT=[{n:'ROUGE-L',v:0.668,c:'#7c3aed'},{n:'Keyword Cov.',v:0.789,c:'#7c3aed'},{n:'Faithfulness',v:0.951,c:'#059669'},{n:'BERTScore F1',v:0.942,c:'#059669'}];
+
+function buildRagas(id,title,metrics){
+  $id(id).innerHTML='<p class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-4">'+title+'</p>'+
+    metrics.map(m=>{
+      var col=m.v>=.85?'#059669':m.v>=.65?'#1d4ed8':'#d97706';
+      return '<div class="mb-3"><div class="flex justify-between mb-1.5"><span class="text-sm text-slate-700">'+m.n+'</span><span class="text-sm font-bold font-mono" style="color:'+col+'">'+m.v.toFixed(3)+'</span></div><div class="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full rounded-full transition-all duration-700" style="width:'+Math.round(m.v*100)+'%;background:'+m.c+'"></div></div></div>';
+    }).join('');
+}
+async function loadAll(){await Promise.all([loadStats(),loadMetricsBI(),loadFeedback(),loadRagEntriesBI()]);}
+async function loadStats(){
+  try{
+    var r=await fetch(API+'/admin/conversations/stats?limit=1000',{headers:{Authorization:'Bearer '+token}});
+    if(!r.ok)return;var d=await r.json();
+    set('top5-sub',d.total_questions+' questions');
+    var telecomQ=(d.top5_questions||[]).filter(item=>item.question.length>5).slice(0,3);
+    var top3El=$id('top3-list');
+    if(!telecomQ.length){top3El.innerHTML='<p class="text-xs text-slate-400 text-center py-4 font-mono">Aucune question télécom</p>';}
+    else{
+      var maxN=telecomQ[0].count||1;
+      top3El.innerHTML=telecomQ.map((item,i)=>
+        '<div class="flex items-start gap-3 py-3 border-b border-slate-100 last:border-0">'+
+          '<div class="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold font-mono flex-shrink-0" style="background:'+RANK_BG[i]+';color:'+RANK_C[i]+'">'+(i+1)+'</div>'+
+          '<div class="flex-1 min-w-0"><p class="text-sm text-slate-700 leading-snug truncate">'+esc(item.question.substring(0,70))+(item.question.length>70?'…':'')+'</p>'+
+          '<div class="mt-1.5 h-1 bg-slate-100 rounded-full overflow-hidden"><div class="h-full rounded-full" style="width:'+Math.round(item.count/maxN*100)+'%;background:'+RANK_C[i]+'"></div></div></div>'+
+          '<span class="text-xs font-bold font-mono flex-shrink-0 pl-2" style="color:'+RANK_C[i]+'">'+item.count+'×</span>'+
+        '</div>'
+      ).join('');
+    }
+    var themes=d.top_themes||[];
+    set('themes-sub',themes.length+' thèmes');buildThemesChart(themes);
+    var top2=d.top2_per_theme||{};
+    var grid=$id('top2-grid');
+    var entries=Object.entries(top2).filter(e=>e[1].length>0).sort((a,b)=>{
+      var ca=(themes.find(t=>t.theme===a[0])||{}).count||0,cb=(themes.find(t=>t.theme===b[0])||{}).count||0;return cb-ca;
+    });
+    if(!entries.length){grid.innerHTML='<p class="text-xs text-slate-400 text-center py-4 font-mono">Aucune conversation</p>';}
+    else{
+      grid.innerHTML=entries.map(([theme,qs],idx)=>{
+        var col=PALETTE[idx%PALETTE.length];
+        var cnt=(themes.find(t=>t.theme===theme)||{}).count||0;
+        return '<div class="rounded-xl border border-slate-200 p-3.5 hover:shadow-card transition-all bg-white">'+
+          '<div class="flex items-center justify-between mb-2"><span class="text-sm font-bold text-slate-800">'+theme+'</span><span class="text-xs font-bold font-mono" style="color:'+col+'">'+cnt+'</span></div>'+
+          '<div class="h-0.5 rounded-full mb-3" style="background:'+col+'30"><div class="h-full rounded-full" style="background:'+col+'"></div></div>'+
+          '<div class="pl-2 border-l-2" style="border-color:'+col+'40">'+qs.map(q=>'<div class="flex items-center justify-between gap-2 py-1"><span class="text-xs text-slate-600 truncate flex-1">'+esc(q.question.substring(0,50))+(q.question.length>50?'…':'')+'</span><span class="text-xs font-mono font-bold text-slate-400 flex-shrink-0">'+q.count+'×</span></div>').join('')+'</div></div>';
+      }).join('');
+    }
+  }catch(e){console.warn(e);}
+}
+async function loadMetricsBI(){
+  try{
+    var [rm,rh]=await Promise.all([fetch(API+'/metrics',{headers:{Authorization:'Bearer '+token}}),fetch(API+'/health',{headers:{Authorization:'Bearer '+token}})]);
+    if(!rm.ok||!rh.ok)return;
+    var m=await rm.json(),h=await rh.json(),n=m.total_requests||0;
+    set('k-total',n.toLocaleString('fr-FR'));set('k-lat',n>0?Math.round(m.avg_latency_ms)+'ms':'—');
+    set('k-unans',h.unanswered_logged||0);set('k-unans-s',(h.telecom_unanswered||0)+' télécom');
+    var tel=h.telecom_unanswered||0,ab=$id('alert-box');
+    if(tel>0){ab.classList.remove('hidden');ab.classList.add('flex');set('alert-txt',tel+' question(s) télécom sans réponse.');}
+    else{ab.classList.add('hidden');ab.classList.remove('flex');}
+  }catch(e){console.warn(e);}
+}
+async function loadFeedback(){
+  try{
+    var r=await fetch(API+'/feedback/stats',{headers:{Authorization:'Bearer '+token}});
+    if(!r.ok)return;var fb=await r.json();
+    var pos=fb.positive||0,neg=fb.negative||0,total=pos+neg,rate=fb.satisfaction_rate||0;
+    set('k-sat',total>0?rate+'%':'—');set('k-sat-s',total+' votes');set('k-neg',neg);set('k-neg-s',pos+' positifs');
+    buildSatChart(pos,neg);
+    var col=rate>=70?'#059669':rate>=40?'#d97706':'#dc2626';
+    $id('sat-leg').innerHTML=
+      '<div class="flex items-center gap-2 mb-2"><div class="w-2.5 h-2.5 rounded-sm bg-green-500"></div><span class="text-sm text-slate-600">Positifs</span><span class="ml-auto font-bold font-mono text-green-600">'+pos+'</span></div>'+
+      '<div class="flex items-center gap-2 mb-2"><div class="w-2.5 h-2.5 rounded-sm bg-red-500"></div><span class="text-sm text-slate-600">Négatifs</span><span class="ml-auto font-bold font-mono text-red-600">'+neg+'</span></div>'+
+      '<div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-sm bg-slate-300"></div><span class="text-sm text-slate-600">Taux</span><span class="ml-auto font-bold font-mono" style="color:'+col+'">'+(total>0?rate+'%':'—')+'</span></div>';
+    var dlEl=$id('dislikes-list');
+    var recent=(fb.recent_negative||[]).filter(f=>f.user_question&&f.user_question.trim());
+    if(!recent.length){dlEl.innerHTML='<p class="text-xs text-slate-400 text-center py-4 font-mono">Aucun dislike</p>';}
+    else{
+      dlEl.innerHTML=recent.slice(0,8).map(f=>{
+        var html='<div class="py-3 border-b border-slate-100 last:border-0"><p class="text-sm text-slate-800 font-medium mb-1">'+esc(f.user_question.substring(0,90))+(f.user_question.length>90?'…':'')+'</p>';
+        if(f.bot_answer)html+='<p class="text-xs text-red-600 bg-red-50 border-l-2 border-red-400 px-2 py-1 rounded-r mb-1">'+esc(f.bot_answer.substring(0,100))+'</p>';
+        html+='<p class="text-xs font-mono text-slate-400">'+new Date(f.timestamp).toLocaleString('fr-FR')+'</p></div>';
+        return html;
+      }).join('');
+    }
+  }catch(e){console.warn(e);}
+}
+async function loadRagEntriesBI(){
+  try{
+    var r=await fetch(API+'/admin/rag/entries',{headers:{Authorization:'Bearer '+token}});
+    if(!r.ok)return;var d=await r.json();
+    set('rag-n',(d.total||0)+' entrées');
+    var el=$id('rag-list');
+    if(!d.entries||!d.entries.length){el.innerHTML='<p class="text-xs text-slate-400 text-center py-4 font-mono">Aucun enrichissement</p>';}
+    else{
+      el.innerHTML=d.entries.slice(0,10).map(e=>
+        '<div class="py-3 border-b border-slate-100 last:border-0">'+
+          '<p class="text-sm font-medium text-slate-800 mb-1">'+esc(e.question.substring(0,60))+(e.question.length>60?'…':'')+'</p>'+
+          '<p class="text-xs text-slate-500 border-l-2 border-brand-300 pl-2 mb-1">'+esc(e.answer.substring(0,72))+(e.answer.length>72?'…':'')+'</p>'+
+          '<p class="text-xs font-mono text-slate-400">'+new Date(e.timestamp).toLocaleString('fr-FR')+'</p></div>'
+      ).join('');
+    }
+  }catch(e){console.warn(e);}
+}
+function buildThemesChart(themes){
+  var ctx=$id('c-themes');if(cThemes)cThemes.destroy();if(!themes.length)return;
+  cThemes=new Chart(ctx,{type:'bar',data:{labels:themes.map(t=>t.theme),datasets:[{data:themes.map(t=>t.count),backgroundColor:themes.map((_,i)=>PALETTE[i%PALETTE.length]+'22'),borderColor:themes.map((_,i)=>PALETTE[i%PALETTE.length]),borderWidth:1.5,borderRadius:6,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{backgroundColor:'#0f172a',padding:8,cornerRadius:8}},scales:{x:{grid:{display:false},ticks:{color:'#94a3b8',font:{size:10,family:'JetBrains Mono'},autoSkip:false,maxRotation:35},border:{color:'transparent'}},y:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:10,family:'JetBrains Mono'}},border:{color:'transparent'}}}}});
+}
+function buildSatChart(pos,neg){
+  var ctx=$id('c-sat');if(cSat)cSat.destroy();
+  cSat=new Chart(ctx,{type:'doughnut',data:{labels:['Positifs','Négatifs'],datasets:[{data:pos+neg>0?[pos,neg]:[1,0],backgroundColor:['#059669','#dc2626'],borderWidth:3,borderColor:'#f8fafc'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{backgroundColor:'#0f172a',padding:8,cornerRadius:8}},cutout:'68%'}});
+}
+setInterval(loadAll,30000);
+function initBIDashboard(){buildRagas('ragas-l','Retrieval RAG',R_LEFT);buildRagas('ragas-r','Qualité de génération',R_RIGHT);loadAll();}
+
+// ═══════════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded',async function(){
+  var restored=await restoreSession();
+  if(restored){$id('auth-overlay').classList.add('hidden');initApp();}
+  else showStep('step-login');
+});
+</script>
+</body>
+</html>

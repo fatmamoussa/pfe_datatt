@@ -1,0 +1,62 @@
+# Environnements virtuels
+rag_env/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Fichiers Python compilés
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Bases de données vectorielles (ChromaDB)
+chroma_tt_db/
+ma_chroma_db/
+
+# Dossiers de données (à ignorer si contient des fichiers non versionnés)
+data/
+models/
+
+# Variables d'environnement et secrets
+.env
+.env.local
+.env.*.local
+
+# Fichiers de logs et bases SQLite (si générés à l'exécution)
+*.log
+*.sqlite
+*.sqlite3
+auth.db  # ajustez selon le nom exact de votre fichier auth_sqlite.py
+
+# Fichiers temporaires système
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Fichiers de configuration IDE (optionnel, selon votre éditeur)
+.vscode/
+.idea/
+*.sublime-*
+
+# Résultats de fine-tuning (poids, checkpoints, sauvegardes)
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+checkpoints/
+
+# Dossiers de cache et autres fichiers générés
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
