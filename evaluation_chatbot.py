@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================
-evaluation_chatbot.py — Évaluation Phi-3.5 vs TinyLlama
+evaluation_chatbot.py — Évaluation Phi-3.5 vs TinyLlama vs Qwen1.5-7B
 Projet : Chatbot Tunisie Telecom — PFE Cycle Ingénieur IA
 
 ADAPTÉ AU FORMAT CHUNKS (texte brut) :
@@ -13,13 +13,16 @@ ADAPTÉ AU FORMAT CHUNKS (texte brut) :
   - Métriques  : Hit-Rate RAG, ROUGE-L, Faithfulness, etc.
 
 UTILISATION :
-  python evaluation_chatbot.py --both
+  python evaluation_chatbot.py --all                    # évaluer les 3 modèles
+  python evaluation_chatbot.py --both                   # Phi vs TinyLlama (compat. ancien)
   python evaluation_chatbot.py --model tinyllama
-  python evaluation_chatbot.py --both --n 50
-  python evaluation_chatbot.py --both --no-injected
-  python evaluation_chatbot.py --both \
-      --phi-url http://localhost:8000 \
-      --tiny-url http://localhost:8001 \
+  python evaluation_chatbot.py --model qwen
+  python evaluation_chatbot.py --all --n 50
+  python evaluation_chatbot.py --all --no-injected
+  python evaluation_chatbot.py --all \
+      --phi-url   http://localhost:8000 \
+      --tiny-url  http://localhost:8001 \
+      --qwen-url  http://localhost:8002 \
       --test-file data/test.json
 =============================================================
 """
@@ -32,6 +35,7 @@ from typing import List, Dict, Optional
 # ─────────────────────────────────────────────────────────────
 API_PHI        = "http://localhost:8000"
 API_TINYLLAMA  = "http://localhost:8001"
+API_QWEN       = "http://localhost:8002"   # ← Qwen1.5-7B
 TEST_FILE      = "data/test.json"
 OUTPUT_REPORT  = "data/evaluation_report.json"
 TOP_K          = 3
@@ -300,6 +304,7 @@ def call_api(question: str, api_base: str, timeout: int = 60) -> Optional[Dict]:
             "mode":             data.get("mode",             "?"),
             "response_time_ms": data.get("response_time_ms", 0),
             "cache_hit":        data.get("cache_hit",        False),
+            "model":            data.get("model",            "unknown"),
         }
     except requests.exceptions.ConnectionError:
         print(f"  [ERREUR] Impossible de joindre {api_base} — API démarrée ?")
@@ -519,10 +524,9 @@ def evaluate_model(
     refs_tc        = []
     cat_stats      = {}
 
-    # ── Compteurs mode génération ──────────────────────────
-    gen_n     = 0   # réponses génératives Phi réussies
-    ext_n     = 0   # fallback extractif (toute raison)
-    no_info_n = 0   # confiance RAG trop faible
+    gen_n     = 0
+    ext_n     = 0
+    no_info_n = 0
 
     for item in test_data:
         q_preview = item["question"][:65]
@@ -547,8 +551,7 @@ def evaluate_model(
         is_tc    = data["is_telecom"]
         mode     = data["mode"]
 
-        # ── Comptage des modes de génération ──────────────
-        if mode == "generative":
+        if mode == "generative" or mode == "generative_rag":
             gen_n += 1
         elif mode.startswith("extractive"):
             ext_n += 1
@@ -577,7 +580,6 @@ def evaluate_model(
         )
         print(f"         Réponse: {answer[:120]}{'...' if len(answer)>120 else ''}")
 
-        # ── Métriques RAG ──────────────────────────────────
         rm = {}
         if item["is_telecom"] and sources:
             eh = chunk_exact_hit(sources, item.get("chunk_id", ""))
@@ -593,7 +595,6 @@ def evaluate_model(
                 }
                 rag_ms.append(rm)
 
-        # ── Métriques génération ───────────────────────────
         gm = {}
         if item["is_telecom"]:
             gm = {
@@ -605,19 +606,18 @@ def evaluate_model(
             }
             gen_ms.append(gm)
 
-        # ── Stats par catégorie ────────────────────────────
         cat = item.get("category", "unknown") or "unknown"
         if cat not in cat_stats:
             cat_stats[cat] = {
                 "n": 0, "classif_ok": 0, "rag_used": 0,
                 "rouge_l_sum": 0.0, "kw_cov_sum": 0.0, "hallucin": 0,
-                "gen_n": 0, "ext_n": 0, "no_info_n": 0,   # compteurs par catégorie
+                "gen_n": 0, "ext_n": 0, "no_info_n": 0,
             }
         cs = cat_stats[cat]
         cs["n"]          += 1
         cs["classif_ok"] += int(is_tc == item["is_telecom"])
         cs["rag_used"]   += int(rag_used)
-        if mode == "generative":
+        if mode in ("generative", "generative_rag"):
             cs["gen_n"] += 1
         elif mode.startswith("extractive"):
             cs["ext_n"] += 1
@@ -646,13 +646,12 @@ def evaluate_model(
             "gen_metrics":      gm,
         })
 
-    # ── BERTScore ─────────────────────────────────────────
+    # BERTScore
     bert = {"f1": None, "precision": None, "recall": None}
     if preds_tc:
         print(f"\n  Calcul BERTScore sur {len(preds_tc)} réponses télécom...")
         bert = bert_score_batch(preds_tc, refs_tc)
 
-    # ── Rapport console ───────────────────────────────────
     n   = len(test_data)
     acc = telecom_ok / n if n else 0
 
@@ -668,30 +667,26 @@ def evaluate_model(
     c  = GREEN if hr <= 0.02 else YELLOW if hr <= 0.05 else RED
     print(f"  [{'OK' if hr<=0.02 else '!!' }] {'Taux hallucinations':<42} {c}{hr:.4f}{RESET}  (↓ souhaité)")
 
-    # ── Modes de génération ────────────────────────────────
     n_answered = len(results)
     print(f"\n  Modes de génération  (sur {n_answered} réponses obtenues)")
     print(f"  {'─'*55}")
 
-    # Génératif
     gen_rate = gen_n / n_answered if n_answered else 0
     c_gen    = GREEN if gen_rate >= 0.60 else YELLOW if gen_rate >= 0.40 else RED
     print(
         f"  [{'OK' if gen_rate>=0.60 else '~~' if gen_rate>=0.40 else '!!'}] "
-        f"{'Génératif (Phi réussi)':<42} "
+        f"{'Génératif (LLM réussi)':<42} "
         f"{c_gen}{gen_n:>4} réponses  ({gen_rate*100:5.1f}%){RESET}"
     )
 
-    # Extractif
     ext_rate = ext_n / n_answered if n_answered else 0
     c_ext    = GREEN if ext_rate <= 0.20 else YELLOW if ext_rate <= 0.40 else RED
     print(
         f"  [{'OK' if ext_rate<=0.20 else '~~' if ext_rate<=0.40 else '!!'}] "
-        f"{'Extractif (fallback Phi)':<42} "
+        f"{'Extractif (fallback)':<42} "
         f"{c_ext}{ext_n:>4} réponses  ({ext_rate*100:5.1f}%){RESET}  (↓ souhaité)"
     )
 
-    # No-info
     noi_rate = no_info_n / n_answered if n_answered else 0
     c_noi    = GREEN if noi_rate <= 0.10 else YELLOW if noi_rate <= 0.20 else RED
     print(
@@ -700,7 +695,6 @@ def evaluate_model(
         f"{c_noi}{no_info_n:>4} réponses  ({noi_rate*100:5.1f}%){RESET}  (↓ souhaité)"
     )
 
-    # Autres modes (greeting, hors_sujet, etc.)
     other_n    = n_answered - gen_n - ext_n - no_info_n
     other_rate = other_n / n_answered if n_answered else 0
     print(
@@ -709,7 +703,6 @@ def evaluate_model(
     )
     print(f"  {'─'*55}")
 
-    # Détail extractif par sous-type
     ext_subtypes = {}
     for r in results:
         m = r["mode"]
@@ -757,7 +750,6 @@ def evaluate_model(
         pm("BERTScore Precision", bert["precision"], good=0.65, warn=0.50)
         pm("BERTScore Recall",    bert["recall"],    good=0.65, warn=0.50)
 
-    # ── Stats par catégorie ────────────────────────────────
     if len(cat_stats) > 1:
         print(f"\n  Détail par catégorie")
         print(
@@ -782,7 +774,6 @@ def evaluate_model(
                 f"{rl:>8.3f} {kw:>8.3f} {ha:>7d}"
             )
 
-    # ── Score composite ────────────────────────────────────
     scores = [acc]
     for k in ["hit_rate", "mrr", "context_relevance"]:
         vs = [m[k] for m in rag_ms if k in m]
@@ -829,7 +820,6 @@ def evaluate_model(
         "max_latency_ms":     max(times) if times else 0,
         "global_score":       gs,
         "grade":              grade,
-        # ── Modes de génération (nouveau) ──
         "generation_modes": {
             "generative_n":    gen_n,
             "extractive_n":    ext_n,
@@ -849,15 +839,15 @@ def evaluate_model(
 
 
 # ═══════════════════════════════════════════════════════════════
-# TABLEAU COMPARATIF
+# TABLEAU COMPARATIF — 2 MODÈLES
 # ═══════════════════════════════════════════════════════════════
 
-def compare(r1: Dict, r2: Dict):
+def compare_two(r1: Dict, r2: Dict):
     n1, n2 = r1["model_name"], r2["model_name"]
     W = 18
 
     print(f"\n{'='*72}")
-    print(f"  TABLEAU COMPARATIF — SOUTENANCE PFE")
+    print(f"  TABLEAU COMPARATIF — {n1}  vs  {n2}")
     print(f"{'='*72}")
     print(f"\n  {'Métrique':<34} {n1:>{W}} {n2:>{W}}")
     print(f"  {'─'*34} {'─'*W} {'─'*W}")
@@ -889,56 +879,201 @@ def compare(r1: Dict, r2: Dict):
     row("Precision@3",        get(r1,"rag_avg","precision_k"),       get(r2,"rag_avg","precision_k"),       good=0.55, warn=0.35)
     row("Context Relevance",  get(r1,"rag_avg","context_relevance"), get(r2,"rag_avg","context_relevance"), good=0.60, warn=0.40)
     row("Chunk Exact Hit",    get(r1,"rag_avg","chunk_exact_hit"),   get(r2,"rag_avg","chunk_exact_hit"),   good=0.40, warn=0.20)
-
     print(f"\n  ── Qualité de génération ──────────────────────────")
     row("ROUGE-L",            get(r1,"gen_avg","rouge_l"),           get(r2,"gen_avg","rouge_l"),           good=0.25, warn=0.12)
     row("Keyword Coverage",   get(r1,"gen_avg","keyword_coverage"),  get(r2,"gen_avg","keyword_coverage"),  good=0.55, warn=0.35)
     row("Faithfulness",       get(r1,"gen_avg","faithfulness"),      get(r2,"gen_avg","faithfulness"),      good=0.40, warn=0.25)
     row("Length Score",       get(r1,"gen_avg","length_score"),      get(r2,"gen_avg","length_score"),      good=0.80, warn=0.50)
-
     print(f"\n  ── Sémantique (BERTScore) ─────────────────────────")
     row("BERTScore F1",       get(r1,"bert_score","f1"),             get(r2,"bert_score","f1"),             good=0.65, warn=0.50)
     row("BERTScore Prec.",    get(r1,"bert_score","precision"),      get(r2,"bert_score","precision"),      good=0.65, warn=0.50)
     row("BERTScore Recall",   get(r1,"bert_score","recall"),         get(r2,"bert_score","recall"),         good=0.65, warn=0.50)
-
     print(f"\n  ── Modes de génération ────────────────────────────")
     row("Taux génératif (%)",
-        get(r1,"generation_modes","generative_rate") * 100,
-        get(r2,"generation_modes","generative_rate") * 100,
+        get(r1,"generation_modes","generative_rate")*100,
+        get(r2,"generation_modes","generative_rate")*100,
         good=60.0, warn=40.0, fmt=".1f")
     row("Taux extractif / fallback (%)",
-        get(r1,"generation_modes","extractive_rate") * 100,
-        get(r2,"generation_modes","extractive_rate") * 100,
+        get(r1,"generation_modes","extractive_rate")*100,
+        get(r2,"generation_modes","extractive_rate")*100,
         good=80.0, warn=60.0, fmt=".1f", lower_better=True)
     row("Taux no-info (%)",
-        get(r1,"generation_modes","no_info_rate") * 100,
-        get(r2,"generation_modes","no_info_rate") * 100,
+        get(r1,"generation_modes","no_info_rate")*100,
+        get(r2,"generation_modes","no_info_rate")*100,
         good=90.0, warn=80.0, fmt=".1f", lower_better=True)
-
     print(f"\n  ── Système ────────────────────────────────────────")
     row("Accuracy classif.",  r1["accuracy"],           r2["accuracy"],           good=0.90, warn=0.75)
     row("Taux RAG activé",    r1["rag_rate"],           r2["rag_rate"],           good=0.70, warn=0.50)
     row("Taux hallucinations",r1["hallucination_rate"], r2["hallucination_rate"], good=0.98, warn=0.95, lower_better=True)
-    row("Latence moy. (ms)",  r1["avg_latency_ms"],     r2["avg_latency_ms"],     good=0.5, warn=0.3, fmt=".0f", lower_better=True)
-
+    row("Latence moy. (ms)",  r1["avg_latency_ms"],     r2["avg_latency_ms"],     good=0.5,  warn=0.3,  fmt=".0f", lower_better=True)
     print(f"\n  ── Score global ───────────────────────────────────")
     row("Score composite",    r1["global_score"],        r2["global_score"],        good=0.65, warn=0.55)
 
-    # ── Résumé modes de génération ─────────────────────────
-    print(f"\n  ── Résumé modes de génération ─────────────────────")
-    for label, key in [("Génératif", "generative_n"), ("Extractif", "extractive_n"), ("No-info", "no_info_n")]:
-        v1 = get(r1, "generation_modes", key)
-        v2 = get(r2, "generation_modes", key)
-        print(f"  {'  '+label:<34} {str(v1):>{W}} {str(v2):>{W}}")
-
     winner = n1 if r1["global_score"] >= r2["global_score"] else n2
     delta  = abs(r1["global_score"] - r2["global_score"])
-
     print(f"\n{'='*72}")
-    print(f"  Meilleur modèle : {BOLD}{winner}{RESET}  (+{delta:.4f})")
+    print(f"  Meilleur : {BOLD}{winner}{RESET}  (+{delta:.4f})")
     print(f"  {n1:<30} : {r1['grade']}")
     print(f"  {n2:<30} : {r2['grade']}")
     print(f"{'='*72}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# TABLEAU COMPARATIF — 3 MODÈLES  ← NOUVEAU
+# ═══════════════════════════════════════════════════════════════
+
+def compare_three(r1: Dict, r2: Dict, r3: Dict):
+    """
+    Tableau comparatif à 3 colonnes : Phi-3.5 | TinyLlama | Qwen1.5-7B
+    Le meilleur sur chaque ligne est indiqué par ◀
+    """
+    n1, n2, n3 = r1["model_name"], r2["model_name"], r3["model_name"]
+    W = 16
+
+    print(f"\n{'='*80}")
+    print(f"  TABLEAU COMPARATIF — 3 MODÈLES — SOUTENANCE PFE")
+    print(f"{'='*80}")
+    print(f"\n  {'Métrique':<32} {n1:>{W}} {n2:>{W}} {n3:>{W}}")
+    print(f"  {'─'*32} {'─'*W} {'─'*W} {'─'*W}")
+
+    def get(d, *keys):
+        for k in keys:
+            d = d.get(k, 0) if isinstance(d, dict) else 0
+        return d or 0
+
+    def row3(label, v1, v2, v3, good=0.7, warn=0.5, fmt=".4f", lower_better=False):
+        vals   = [v1, v2, v3]
+        best   = min(vals) if lower_better else max(vals)
+        marks  = [" ◀" if v == best else "" for v in vals]
+        # Normalise pour la couleur
+        if lower_better:
+            enorm = [(1 - v / max(max(vals), 0.001)) for v in vals]
+        else:
+            enorm = vals
+        cols = [color(e, good, warn) for e in enorm]
+        cells = [
+            f"{cols[i]}{f'{vals[i]:{fmt}}{marks[i]}':>{W}}{RESET}"
+            for i in range(3)
+        ]
+        print(f"  {label:<32} {cells[0]} {cells[1]} {cells[2]}")
+
+    print(f"\n  ── Métriques RAG ──────────────────────────────────────────")
+    row3("Hit Rate@3",
+         get(r1,"rag_avg","hit_rate"),          get(r2,"rag_avg","hit_rate"),          get(r3,"rag_avg","hit_rate"),
+         good=0.70, warn=0.50)
+    row3("MRR",
+         get(r1,"rag_avg","mrr"),               get(r2,"rag_avg","mrr"),               get(r3,"rag_avg","mrr"),
+         good=0.65, warn=0.45)
+    row3("Precision@3",
+         get(r1,"rag_avg","precision_k"),       get(r2,"rag_avg","precision_k"),       get(r3,"rag_avg","precision_k"),
+         good=0.55, warn=0.35)
+    row3("Context Relevance",
+         get(r1,"rag_avg","context_relevance"), get(r2,"rag_avg","context_relevance"), get(r3,"rag_avg","context_relevance"),
+         good=0.60, warn=0.40)
+    row3("Chunk Exact Hit",
+         get(r1,"rag_avg","chunk_exact_hit"),   get(r2,"rag_avg","chunk_exact_hit"),   get(r3,"rag_avg","chunk_exact_hit"),
+         good=0.40, warn=0.20)
+
+    print(f"\n  ── Qualité de génération ──────────────────────────────────")
+    row3("ROUGE-L",
+         get(r1,"gen_avg","rouge_l"),           get(r2,"gen_avg","rouge_l"),           get(r3,"gen_avg","rouge_l"),
+         good=0.25, warn=0.12)
+    row3("Keyword Coverage",
+         get(r1,"gen_avg","keyword_coverage"),  get(r2,"gen_avg","keyword_coverage"),  get(r3,"gen_avg","keyword_coverage"),
+         good=0.55, warn=0.35)
+    row3("Faithfulness",
+         get(r1,"gen_avg","faithfulness"),      get(r2,"gen_avg","faithfulness"),      get(r3,"gen_avg","faithfulness"),
+         good=0.40, warn=0.25)
+    row3("Length Score",
+         get(r1,"gen_avg","length_score"),      get(r2,"gen_avg","length_score"),      get(r3,"gen_avg","length_score"),
+         good=0.80, warn=0.50)
+
+    print(f"\n  ── Sémantique (BERTScore) ─────────────────────────────────")
+    row3("BERTScore F1",
+         get(r1,"bert_score","f1"),             get(r2,"bert_score","f1"),             get(r3,"bert_score","f1"),
+         good=0.65, warn=0.50)
+    row3("BERTScore Precision",
+         get(r1,"bert_score","precision"),      get(r2,"bert_score","precision"),      get(r3,"bert_score","precision"),
+         good=0.65, warn=0.50)
+    row3("BERTScore Recall",
+         get(r1,"bert_score","recall"),         get(r2,"bert_score","recall"),         get(r3,"bert_score","recall"),
+         good=0.65, warn=0.50)
+
+    print(f"\n  ── Modes de génération ────────────────────────────────────")
+    row3("Taux génératif (%)",
+         get(r1,"generation_modes","generative_rate")*100,
+         get(r2,"generation_modes","generative_rate")*100,
+         get(r3,"generation_modes","generative_rate")*100,
+         good=60.0, warn=40.0, fmt=".1f")
+    row3("Taux extractif / fallback (%)",
+         get(r1,"generation_modes","extractive_rate")*100,
+         get(r2,"generation_modes","extractive_rate")*100,
+         get(r3,"generation_modes","extractive_rate")*100,
+         good=80.0, warn=60.0, fmt=".1f", lower_better=True)
+    row3("Taux no-info (%)",
+         get(r1,"generation_modes","no_info_rate")*100,
+         get(r2,"generation_modes","no_info_rate")*100,
+         get(r3,"generation_modes","no_info_rate")*100,
+         good=90.0, warn=80.0, fmt=".1f", lower_better=True)
+
+    print(f"\n  ── Système ────────────────────────────────────────────────")
+    row3("Accuracy classif.",
+         r1["accuracy"],           r2["accuracy"],           r3["accuracy"],
+         good=0.90, warn=0.75)
+    row3("Taux RAG activé",
+         r1["rag_rate"],           r2["rag_rate"],           r3["rag_rate"],
+         good=0.70, warn=0.50)
+    row3("Taux hallucinations",
+         r1["hallucination_rate"], r2["hallucination_rate"], r3["hallucination_rate"],
+         good=0.98, warn=0.95, lower_better=True)
+    row3("Latence moy. (ms)",
+         r1["avg_latency_ms"],     r2["avg_latency_ms"],     r3["avg_latency_ms"],
+         good=0.5, warn=0.3, fmt=".0f", lower_better=True)
+    row3("Latence médiane (ms)",
+         r1["median_latency_ms"],  r2["median_latency_ms"],  r3["median_latency_ms"],
+         good=0.5, warn=0.3, fmt=".0f", lower_better=True)
+
+    print(f"\n  ── Score global ───────────────────────────────────────────")
+    row3("Score composite",
+         r1["global_score"],       r2["global_score"],       r3["global_score"],
+         good=0.65, warn=0.55)
+
+    # Classement final
+    ranked = sorted(
+        [(r1["global_score"], n1, r1["grade"]),
+         (r2["global_score"], n2, r2["grade"]),
+         (r3["global_score"], n3, r3["grade"])],
+        reverse=True
+    )
+    print(f"\n{'='*80}")
+    print(f"  CLASSEMENT FINAL")
+    print(f"  {'─'*78}")
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (score, name, grade) in enumerate(ranked):
+        medal = medals[i] if i < len(medals) else f"  {i+1}."
+        delta = score - ranked[-1][0]
+        delta_str = f"  +{delta:.4f} vs dernier" if i < len(ranked)-1 else ""
+        print(f"  {medal}  {name:<30}  Score: {score:.4f}  |  {grade}{delta_str}")
+
+    print(f"\n  Gagnant absolu : {BOLD}{ranked[0][1]}{RESET}")
+    print(f"{'='*80}")
+
+    # Résumé modes par modèle
+    print(f"\n  RÉSUMÉ MODES DE GÉNÉRATION")
+    print(f"  {'─'*78}")
+    print(f"  {'Mode':<30} {n1:>{W}} {n2:>{W}} {n3:>{W}}")
+    print(f"  {'─'*30} {'─'*W} {'─'*W} {'─'*W}")
+    for label, key in [
+        ("Génératif (n)",   "generative_n"),
+        ("Extractif (n)",   "extractive_n"),
+        ("No-info (n)",     "no_info_n"),
+        ("Autres (n)",      "other_n"),
+    ]:
+        v1 = get(r1, "generation_modes", key)
+        v2 = get(r2, "generation_modes", key)
+        v3 = get(r3, "generation_modes", key)
+        print(f"  {label:<30} {str(v1):>{W}} {str(v2):>{W}} {str(v3):>{W}}")
+    print(f"{'='*80}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -947,11 +1082,14 @@ def compare(r1: Dict, r2: Dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Évaluation Chatbot TT — Phi-3.5 vs TinyLlama (format chunks bruts)"
+        description="Évaluation Chatbot TT — Phi-3.5 vs TinyLlama vs Qwen1.5-7B"
     )
+    parser.add_argument("--all",         action="store_true",
+                        help="Évaluer et comparer les 3 modèles (Phi + TinyLlama + Qwen)")
     parser.add_argument("--both",        action="store_true",
-                        help="Évaluer et comparer les deux modèles")
-    parser.add_argument("--model",       choices=["phi", "tinyllama"], default="phi")
+                        help="Évaluer et comparer Phi vs TinyLlama (compatibilité ancienne version)")
+    parser.add_argument("--model",       choices=["phi", "tinyllama", "qwen"], default="phi",
+                        help="Évaluer un seul modèle")
     parser.add_argument("--n",           type=int, default=N_QUESTIONS,
                         help="Nombre de chunks à évaluer (défaut : tout)")
     parser.add_argument("--no-injected", action="store_true",
@@ -959,18 +1097,21 @@ def main():
     parser.add_argument("--test-file",   default=TEST_FILE)
     parser.add_argument("--phi-url",     default=API_PHI)
     parser.add_argument("--tiny-url",    default=API_TINYLLAMA)
+    parser.add_argument("--qwen-url",    default=API_QWEN,
+                        help=f"URL de l'API Qwen1.5-7B (défaut: {API_QWEN})")
     parser.add_argument("--output",      default=OUTPUT_REPORT)
     args = parser.parse_args()
 
-    print("\n" + "="*65)
+    print("\n" + "="*72)
     print("  Évaluation Chatbot Tunisie Telecom — PFE")
     print("  (Dataset : chunks texte brut)")
-    print("="*65)
-    print(f"  Phi-3.5    : {args.phi_url}")
-    print(f"  TinyLlama  : {args.tiny_url}")
-    print(f"  Dataset    : {args.test_file}")
-    print(f"  Rapport    : {args.output}")
-    print("="*65)
+    print("="*72)
+    print(f"  Phi-3.5      : {args.phi_url}")
+    print(f"  TinyLlama    : {args.tiny_url}")
+    print(f"  Qwen1.5-7B   : {args.qwen_url}  ← NOUVEAU")
+    print(f"  Dataset      : {args.test_file}")
+    print(f"  Rapport      : {args.output}")
+    print("="*72)
 
     try:
         import rouge_score  # noqa
@@ -993,11 +1134,60 @@ def main():
 
     final = {}
 
-    if args.both:
+    # ─────────────────────────────────────────
+    # Cas 1 : --all  → évaluer les 3 modèles
+    # ─────────────────────────────────────────
+    if args.all:
+        r_phi  = evaluate_model(test_data, args.phi_url,  "Phi-3.5-mini-FT")
+        r_tiny = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT")
+        r_qwen = evaluate_model(test_data, args.qwen_url, "Qwen1.5-7B-FT")
+
+        valid = {k: v for k, v in {
+            "phi":  r_phi,
+            "tiny": r_tiny,
+            "qwen": r_qwen,
+        }.items() if v}
+
+        # Comparaisons 2 à 2 si au moins 2 modèles ont répondu
+        available = list(valid.values())
+        if len(available) >= 2:
+            for i in range(len(available)):
+                for j in range(i + 1, len(available)):
+                    compare_two(available[i], available[j])
+
+        # Comparatif 3 colonnes si tous disponibles
+        if len(available) == 3:
+            compare_three(r_phi, r_tiny, r_qwen)
+
+        # Classement global simplifié si certains modèles sont absents
+        if len(available) == 2:
+            m1, m2 = available
+            winner = m1["model_name"] if m1["global_score"] >= m2["global_score"] else m2["model_name"]
+            delta  = abs(m1["global_score"] - m2["global_score"])
+            print(f"\n  Meilleur modèle : {BOLD}{winner}{RESET}  (+{delta:.4f})")
+
+        ranked = sorted(valid.values(), key=lambda x: x["global_score"], reverse=True)
+        final = {
+            "phi35":       r_phi,
+            "tinyllama":   r_tiny,
+            "qwen15":      r_qwen,
+            "ranking": [
+                {"rank": i+1, "model": r["model_name"],
+                 "score": r["global_score"], "grade": r["grade"]}
+                for i, r in enumerate(ranked)
+            ],
+            "winner":       ranked[0]["model_name"] if ranked else "",
+            "generated_at": __import__("datetime").datetime.now().isoformat(),
+        }
+
+    # ─────────────────────────────────────────
+    # Cas 2 : --both  → Phi vs TinyLlama (compat.)
+    # ─────────────────────────────────────────
+    elif args.both:
         r_phi  = evaluate_model(test_data, args.phi_url,  "Phi-3.5-mini-FT")
         r_tiny = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT")
         if r_phi and r_tiny:
-            compare(r_phi, r_tiny)
+            compare_two(r_phi, r_tiny)
             final = {
                 "phi35":     r_phi,
                 "tinyllama": r_tiny,
@@ -1012,10 +1202,15 @@ def main():
         else:
             final = {"phi35": r_phi, "tinyllama": r_tiny}
 
+    # ─────────────────────────────────────────
+    # Cas 3 : --model <nom>  → un seul modèle
+    # ─────────────────────────────────────────
     elif args.model == "tinyllama":
         final = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT") or {}
+    elif args.model == "qwen":
+        final = evaluate_model(test_data, args.qwen_url, "Qwen1.5-7B-FT") or {}
     else:
-        final = evaluate_model(test_data, args.phi_url,  "Phi-3.5-mini-FT")   or {}
+        final = evaluate_model(test_data, args.phi_url, "Phi-3.5-mini-FT") or {}
 
     if final:
         os.makedirs(

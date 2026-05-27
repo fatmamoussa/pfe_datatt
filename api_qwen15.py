@@ -1,20 +1,26 @@
 """
 =============================================================
-API v2.17 — Chatbot Tunisie Telecom — TinyLlama 1.1B
-CORRECTIONS v2.17 :
-  [FIX-1] correct_telecom_keywords : whitelist mots FR courants
-          + score_cutoff fuzzy 70 → 82 (évite "taper"→"tarif")
-  [FIX-2] _chunks_are_coherent() : filtre post-retrieval
-          overlap lexical minimum 10% entre query et top chunk
-  [FIX-3] TOP_K default 3 → 5
+API v1.0 — Chatbot Tunisie Telecom — Qwen1.5-7B-Chat
+Adapté depuis api_tinyllama.py (TinyLlama 1.1B)
 
-CORRECTIONS v2.16 :
-  [FIX-1] Routes auth montées (/auth/login, /auth/register, etc.)
-  [FIX-2] init_auth_db() appelé dans lifespan
-  [FIX-3] Routes manquantes ajoutées :
-            GET /admin/conversations/stats
-            GET /feedback/stats
-  [FIX-4] Header importé depuis fastapi (manquait pour require_auth)
+DIFFERENCES vs TinyLlama :
+  - BASE_MODEL   : Qwen/Qwen1.5-7B-Chat
+  - Format prompt: ChatML  (<|im_start|>/<|im_end|>)
+  - MODEL_DIR    : models/qwen15-tt-merged
+  - VRAM         : ~14 GB fp16  |  ~5 GB QLoRA 4-bit
+  - MAX_NEW_TOKENS: 150 (7B génère plus vite/mieux)
+  - Warm-up      : prompt ChatML au lieu de Llama-chat
+
+UTILISATION :
+  python api_qwen15.py
+  # ou avec variables d'environnement :
+  MODEL_DIR_QWEN=models/qwen15-tt-merged \
+  EXTRACTIVE_MODE=false \
+  python api_qwen15.py
+
+SORTIES :
+  http://0.0.0.0:8002/docs   -> Swagger UI
+  http://0.0.0.0:8002/chat   -> POST endpoint principal
 =============================================================
 """
 
@@ -36,6 +42,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from rapidfuzz import fuzz, process
 
+# =============================================================
+# Import auth_sqlite (même module que TinyLlama)
+# =============================================================
 from auth_sqlite import (
     init_auth_db,
     register_route,
@@ -54,25 +63,24 @@ from auth_sqlite import (
 )
 
 # =============================================================
-# CONFIG
+# CONFIG — Qwen1.5-7B-Chat
 # =============================================================
-MODEL_DIR       = os.environ.get("MODEL_DIR_TINY", "models/tinyllama-tt-merged")
-BASE_MODEL      = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_DIR       = os.environ.get("MODEL_DIR_QWEN", "models/qwen15-tt-merged")
+BASE_MODEL      = "Qwen/Qwen1.5-7B-Chat"
 EXTRACTIVE_MODE = os.environ.get("EXTRACTIVE_MODE", "false").lower() == "true"
 
-MAX_NEW_TOKENS     = int(os.environ.get("MAX_NEW_TOKENS",     "120"))
+# Qwen1.5-7B génère mieux → on peut se permettre plus de tokens
+MAX_NEW_TOKENS     = int(os.environ.get("MAX_NEW_TOKENS",     "150"))
 MIN_NEW_TOKENS     = int(os.environ.get("MIN_NEW_TOKENS",     "40"))
-MAX_NEW_TOKENS_CAP = int(os.environ.get("MAX_NEW_TOKENS_CAP", "280"))
+MAX_NEW_TOKENS_CAP = int(os.environ.get("MAX_NEW_TOKENS_CAP", "320"))
 
 DO_SAMPLE          = False
-REPETITION_PENALTY = 1.3
+REPETITION_PENALTY = 1.2   # Qwen1.5 : légèrement moins agressif que TinyLlama
 
 CHROMA_DB_DIR   = os.environ.get("CHROMA_DB_DIR",   "chroma_tt_db")
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "tt_train")
 EMBED_MODEL     = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-
-# [FIX-3] TOP_K default 3 → 5
-TOP_K = int(os.environ.get("TOP_K", "5"))
+TOP_K           = int(os.environ.get("TOP_K", "3"))
 
 ADMIN_SCORE_BOOST      = float(os.environ.get("ADMIN_SCORE_BOOST",      "0.10"))
 ADMIN_DIRECT_THRESHOLD = float(os.environ.get("ADMIN_DIRECT_THRESHOLD", "0.72"))
@@ -83,9 +91,6 @@ THRESHOLD_LONG_QUERY  = float(os.environ.get("THRESHOLD_LONG_QUERY",  "0.50"))
 SHORT_QUERY_MAX_WORDS = 4
 MIN_CONTEXT_COVERAGE  = float(os.environ.get("MIN_CONTEXT_COVERAGE",  "0.20"))
 
-# [FIX-2] Seuil overlap lexical minimum pour validation chunk
-COHERENCE_OVERLAP_MIN = float(os.environ.get("COHERENCE_OVERLAP_MIN", "0.10"))
-
 MODEL_IDLE_TIMEOUT         = int(os.environ.get("MODEL_IDLE_TIMEOUT",         "1800"))
 STRUCTURED_CHUNK_MAX_CHARS = int(os.environ.get("STRUCTURED_CHUNK_MAX_CHARS", "600"))
 
@@ -94,8 +99,14 @@ TORCH_COMPILE_ENABLED = os.environ.get("TORCH_COMPILE", "false").lower() == "tru
 DB_PATH    = os.environ.get("DB_PATH",    "data/chatbot.db")
 STATIC_DIR = os.environ.get("STATIC_DIR", "static")
 API_HOST   = "0.0.0.0"
-API_PORT   = 8001
+API_PORT   = int(os.environ.get("API_PORT", "8002"))   # 8002 pour coexister avec TinyLlama
 MAX_HISTORY = 10
+
+# =============================================================
+# Tokens spéciaux ChatML — Qwen1.5
+# =============================================================
+IM_START = "<|im_start|>"
+IM_END   = "<|im_end|>"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -117,9 +128,6 @@ _global_metrics = {
     "stream_requests": 0, "raw_table_filtered_count": 0,
     "icons_stripped_count": 0, "multi_criteria_count": 0,
     "fusion_used_count": 0,
-    # v2.17
-    "coherence_rejected_count": 0,
-    "fuzzy_correction_blocked": 0,
 }
 
 _live_metrics_lock    = threading.Lock()
@@ -134,7 +142,7 @@ GREETINGS = [
 ]
 GREETING_RESPONSE = (
     "Bonjour ! Je suis l'assistant virtuel de Tunisie Telecom. "
-    "Je suis la pour vous aider concernant nos offres et services.\n"
+    "Je suis là pour vous aider concernant nos offres et services.\n"
     "- Les offres mobiles (Hayya, forfaits 4G/5G)\n"
     "- L'internet fixe (ADSL, Fibre, NetBox)\n"
     "- Le roaming international\n"
@@ -232,10 +240,12 @@ PROMPT_LEAKS = [
     "donne toujours une reponse","reponse precise en 1","reponds uniquement",
     "assistant officiel","selon le contexte","d'apres le contexte",
     "reformule en une phrase","voici la reponse de tunisie","flash commercial",
+    # Qwen1.5 spécifique : éviter les fuites du template ChatML
+    "im_start","im_end","<|im_start|>","<|im_end|>",
 ]
 
 FALLBACK_NO_INFO = (
-    "Je n'ai pas trouve d'information precise sur ce sujet. "
+    "Je n'ai pas trouvé d'information précise sur ce sujet. "
     "Contactez le service client au 1298."
 )
 
@@ -263,25 +273,6 @@ CORRECTIONS_DIRECTES = {
     "netboc":"netbox","netbok":"netbox",
     "dimconnect":"dim connect","dim@connect":"dim connect",
     "passweekend":"pass weekend",
-}
-
-# =============================================================
-# [FIX-1] Whitelist mots français courants à ne PAS corriger
-# =============================================================
-_COMMON_WORDS_FR = {
-    "taper","voir","reste","combien","faut","pour","comment",
-    "quel","quels","quelle","quelles","mon","ma","mes","je","me",
-    "il","elle","nous","vous","ils","elles","qui","que","quoi",
-    "dont","avoir","etre","faire","vouloir","pouvoir","savoir",
-    "aller","venir","mettre","prendre","donner","trouver","parler",
-    "avec","dans","sans","sous","sur","par","vers","chez","entre",
-    "depuis","pendant","avant","apres","encore","toujours","jamais",
-    "souvent","parfois","bien","tres","plus","moins","aussi","donc",
-    "mais","car","puis","ainsi","alors","cela","ceci","tout","tous",
-    "cette","cette","leur","leurs","notre","votre","son","ses",
-    "chaque","autre","autres","nouveau","nouvelle","grand","petit",
-    "même","comme","quand","si","non","oui","pas","plus","peu",
-    "trop","assez","beaucoup","plusieurs","certains","certaines",
 }
 
 _JSONL_ARTIFACTS = [
@@ -394,7 +385,7 @@ TELECOM_THEME_KEYWORDS = {
 
 
 # =============================================================
-# UTILITAIRES
+# UTILITAIRES (identiques TinyLlama)
 # =============================================================
 
 def normalize_query(text: str) -> str:
@@ -403,33 +394,16 @@ def normalize_query(text: str) -> str:
         if unicodedata.category(c) != 'Mn'
     )
 
-# =============================================================
-# [FIX-1] correct_telecom_keywords amélioré
-# =============================================================
 def correct_telecom_keywords(query: str) -> str:
     words = query.lower().split()
     corrected = []
     for word in words:
-        # Mots trop courts : pas de correction
         if len(word) <= 3:
-            corrected.append(word)
-            continue
-        # Mots français courants : ne jamais corriger
-        if word in _COMMON_WORDS_FR:
-            corrected.append(word)
-            continue
-        # Corrections directes connues
+            corrected.append(word); continue
         if word in CORRECTIONS_DIRECTES:
-            corrected.append(CORRECTIONS_DIRECTES[word])
-            continue
-        # Fuzzy seulement pour les vrais termes télécom mal orthographiés
-        # score_cutoff relevé 70 → 82 pour éviter les faux positifs
-        match = process.extractOne(
-            word, VOCAB_TELECOM, scorer=fuzz.ratio, score_cutoff=82
-        )
+            corrected.append(CORRECTIONS_DIRECTES[word]); continue
+        match = process.extractOne(word, VOCAB_TELECOM, scorer=fuzz.ratio, score_cutoff=70)
         if match and match[0] != word:
-            logger.debug("[FIX1] Correction fuzzy : '%s' → '%s' (score=%d)",
-                         word, match[0], match[1])
             corrected.append(match[0])
         else:
             corrected.append(word)
@@ -491,7 +465,7 @@ def _is_multi_criteria_query(query: str) -> bool:
     q_norm  = normalize_query(query.lower())
     matched = any(pat.search(q_norm) for pat in _MULTI_CRITERIA_COMPILED)
     if matched:
-        logger.info("[MCRIT] Question multi-criteres : '%s'", query[:80])
+        logger.info("[MCRIT] Question multi-critères : '%s'", query[:80])
         with _metrics_lock:
             _global_metrics["multi_criteria_count"] += 1
     return matched
@@ -660,21 +634,21 @@ def _build_fused_context(chunks: List[dict], max_chars_per_chunk: int = 500) -> 
 def estimate_max_tokens(query: str, chunks: List[dict]) -> int:
     query_norm = normalize_query(query.lower())
     if _is_multi_criteria_query(query):
-        estimated, reason = 280, "multi_criteres"
+        estimated, reason = 320, "multi_criteres"
     elif _is_multiline_query(query):
-        estimated, reason = 220, "multiline_procedure"
+        estimated, reason = 250, "multiline_procedure"
     elif any(kw in query_norm for kw in _LIST_TRIGGERS):
-        estimated, reason = 180, "liste_avantages"
+        estimated, reason = 200, "liste_avantages"
     elif chunks:
         context_word_count = len(_build_clean_context(chunks, max_chars=220).split())
         if context_word_count > 80:
-            estimated, reason = 200, f"contexte_long_{context_word_count}mots"
+            estimated, reason = 220, f"contexte_long_{context_word_count}mots"
         elif context_word_count > 50:
-            estimated, reason = 160, f"contexte_moyen_{context_word_count}mots"
+            estimated, reason = 170, f"contexte_moyen_{context_word_count}mots"
         else:
             estimated, reason = MAX_NEW_TOKENS, "contexte_court"
     elif any(kw in query_norm for kw in _SIMPLE_TRIGGERS):
-        estimated, reason = 100, "question_simple"
+        estimated, reason = 120, "question_simple"
     else:
         estimated, reason = MAX_NEW_TOKENS, "defaut"
     final = max(MIN_NEW_TOKENS, min(MAX_NEW_TOKENS_CAP, estimated))
@@ -827,7 +801,8 @@ def build_extractive_answer(chunks: List[dict], query: str) -> str:
 
 
 # =============================================================
-# MODELE — fp16 sans bitsandbytes
+# MODELE — Qwen1.5-7B-Chat fp16
+# Différence clé vs TinyLlama : padding_side="left" OK pour Qwen1.5
 # =============================================================
 
 _model           = None
@@ -839,11 +814,17 @@ def _load_model():
     global _model, _tokenizer
     from transformers import AutoTokenizer, AutoModelForCausalLM
     model_path = MODEL_DIR if os.path.isdir(MODEL_DIR) else BASE_MODEL
-    logger.info("[MODEL] Chargement TinyLlama fp16 : %s", model_path)
+    logger.info("[MODEL] Chargement Qwen1.5-7B-Chat fp16 : %s", model_path)
     _tokenizer = AutoTokenizer.from_pretrained(
-        model_path, trust_remote_code=True, padding_side="left"
+        model_path,
+        trust_remote_code=True,
+        padding_side="left",   # Qwen1.5 : left padding pour batch inference
     )
-    _tokenizer.pad_token = _tokenizer.eos_token
+    # Qwen1.5 : pad_token = eos_token si absent
+    if _tokenizer.pad_token is None:
+        _tokenizer.pad_token    = _tokenizer.eos_token
+        _tokenizer.pad_token_id = _tokenizer.eos_token_id
+
     device_map = {"": "cuda:0"} if torch.cuda.is_available() else {"": "cpu"}
     _model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -853,7 +834,8 @@ def _load_model():
         low_cpu_mem_usage=True,
     )
     _model.eval()
-    logger.info("[MODEL] Charge | device=%s | dtype=%s",
+    _model.config.use_cache = True
+    logger.info("[MODEL] Qwen1.5-7B chargé | device=%s | dtype=%s",
                 next(_model.parameters()).device,
                 next(_model.parameters()).dtype)
     if TORCH_COMPILE_ENABLED and torch.cuda.is_available():
@@ -864,18 +846,28 @@ def _load_model():
             logger.warning("[MODEL] torch.compile non disponible : %s", e)
 
 def _warmup_model():
+    """
+    Warm-up Qwen1.5 — utilise le format ChatML natif.
+    Différence TinyLlama : <|im_start|>...<|im_end|> au lieu de <|system|>...</s>
+    """
     global _model_last_used
     if _model is None or _tokenizer is None: return
     try:
-        dummy = "<|system|>\nTu es un assistant.</s>\n<|user|>\nBonjour.</s>\n<|assistant|>\n"
+        dummy = (
+            f"{IM_START}system\nTu es un assistant.\n{IM_END}\n"
+            f"{IM_START}user\nBonjour.\n{IM_END}\n"
+            f"{IM_START}assistant\n"
+        )
         inputs = _tokenizer(dummy, return_tensors="pt").to(next(_model.parameters()).device)
         with torch.no_grad():
-            _ = _model.generate(**inputs, max_new_tokens=5, do_sample=False,
-                                pad_token_id=_tokenizer.eos_token_id, use_cache=True)
+            _ = _model.generate(
+                **inputs, max_new_tokens=5, do_sample=False,
+                pad_token_id=_tokenizer.eos_token_id, use_cache=True
+            )
         _model_last_used = time.time()
-        logger.info("[MODEL] Warm-up termine")
+        logger.info("[MODEL] Warm-up Qwen1.5 terminé")
     except Exception as e:
-        logger.warning("[MODEL] Warm-up echoue : %s", e)
+        logger.warning("[MODEL] Warm-up échoué : %s", e)
 
 def _unload_model():
     global _model, _tokenizer
@@ -904,7 +896,7 @@ def model_watchdog():
         with _model_lock:
             if _model is not None and (time.time() - _model_last_used) > MODEL_IDLE_TIMEOUT:
                 _unload_model()
-                logger.info("[MODEL] Dechargé après inactivité")
+                logger.info("[MODEL] Qwen1.5-7B déchargé après inactivité")
 
 def init_model():
     with _model_lock:
@@ -913,10 +905,16 @@ def init_model():
 
 
 # =============================================================
-# PROMPT TINYLLAMA
+# PROMPT QWEN1.5 — FORMAT CHATML
+# Différence clé vs TinyLlama :
+#   TinyLlama  : "<|system|>\n{sys}</s>\n<|user|>\n{usr}</s>\n<|assistant|>\n"
+#   Qwen1.5    : "<|im_start|>system\n{sys}\n<|im_end|>\n
+#                 <|im_start|>user\n{usr}\n<|im_end|>\n
+#                 <|im_start|>assistant\n"
 # =============================================================
 
-def _build_clean_context(chunks: List[dict], max_chars: int = 250) -> str:
+def _build_clean_context(chunks: List[dict], max_chars: int = 300) -> str:
+    """Qwen1.5 gère mieux les longs contextes → on peut monter à 300 chars."""
     parts = []
     for chunk in chunks[:2]:
         cleaned = clean_chunk(chunk["text"])
@@ -929,36 +927,44 @@ def _build_clean_context(chunks: List[dict], max_chars: int = 250) -> str:
     return " ".join(parts)
 
 def build_generative_prompt(query: str, chunks: List[dict]) -> str:
+    """
+    Construit le prompt au format ChatML Qwen1.5.
+    Le système est plus concis que TinyLlama car Qwen1.5-7B suit mieux les instructions.
+    """
     is_multiline  = _is_multiline_query(query)
     is_list       = any(kw in normalize_query(query.lower()) for kw in _LIST_TRIGGERS)
     is_multi_crit = _is_multi_criteria_query(query)
+
     if is_multi_crit:
         context     = _build_fused_context(chunks, max_chars_per_chunk=500)
-        instruction = "Reponds en 3 phrases courtes et completes, une par critere demande."
+        instruction = "Réponds en 3 phrases courtes et complètes, une par critère demandé."
     elif is_multiline:
-        context     = _build_clean_context(chunks, max_chars=400)
+        context     = _build_clean_context(chunks, max_chars=450)
         instruction = "Explique en 3 phrases maximum comment faire cela."
     elif is_list:
-        context     = _build_clean_context(chunks, max_chars=400)
+        context     = _build_clean_context(chunks, max_chars=450)
         instruction = "Liste les points principaux en 3 phrases maximum."
     else:
-        context     = _build_clean_context(chunks, max_chars=250)
-        instruction = "Reponds en 1 ou 2 phrases courtes et completes."
-    system = (
+        context     = _build_clean_context(chunks, max_chars=300)
+        instruction = "Réponds en 1 ou 2 phrases courtes et complètes."
+
+    system_msg = (
         "Tu es l'assistant de Tunisie Telecom. "
         "Utilise UNIQUEMENT l'information ci-dessous. "
-        "N'invente rien. Reponds en francais. "
-        "N'utilise aucun emoji, bullet ou icone dans ta reponse."
+        "N'invente rien. Réponds en français. "
+        "N'utilise aucun emoji, bullet ou icône."
     )
-    user = (
-        f"Information disponible : {context}\n\n"
+    user_msg = (
+        f"Information : {context}\n\n"
         f"Question : {query}\n\n"
         f"{instruction}"
     )
+
+    # Format ChatML natif Qwen1.5
     return (
-        f"<|system|>\n{system}</s>\n"
-        f"<|user|>\n{user}</s>\n"
-        f"<|assistant|>\n"
+        f"{IM_START}system\n{system_msg}\n{IM_END}\n"
+        f"{IM_START}user\n{user_msg}\n{IM_END}\n"
+        f"{IM_START}assistant\n"
     )
 
 def _token_overlap(text1: str, text2: str) -> float:
@@ -967,13 +973,26 @@ def _token_overlap(text1: str, text2: str) -> float:
     if not words1 or not words2: return 0.0
     return len(words1 & words2) / max(len(words1), len(words2))
 
-def _validate_tinyllama_response(response: str, query: str, chunks: List[dict], context: str) -> tuple:
-    if len(response.strip()) < 10:                          return False, "trop_court"
-    if _contains_raw_table(response):                       return False, "tableau_brut"
-    if any(sig in response.lower() for sig in HALLUCINATION_SIGNALS): return False, "hallucination"
+def _validate_qwen_response(response: str, query: str, chunks: List[dict], context: str) -> tuple:
+    """
+    Validation adaptée Qwen1.5 :
+    - Même logique que TinyLlama
+    - Ajout : filtrage des tokens spéciaux ChatML résiduels
+    """
+    if len(response.strip()) < 10:
+        return False, "trop_court"
+    # Filtrage tokens ChatML résiduels (Qwen1.5 peut les générer en cas de troncature)
+    if IM_START in response or IM_END in response:
+        return False, "token_chatml_residuel"
+    if _contains_raw_table(response):
+        return False, "tableau_brut"
+    if any(sig in response.lower() for sig in HALLUCINATION_SIGNALS):
+        return False, "hallucination"
     resp_norm = normalize_query(response.lower())
-    if any(leak in resp_norm for leak in PROMPT_LEAKS):     return False, "fuite_prompt"
-    if any(n in response.lower() for n in GENERATION_NOISE): return False, "bruit"
+    if any(leak in resp_norm for leak in PROMPT_LEAKS):
+        return False, "fuite_prompt"
+    if any(n in response.lower() for n in GENERATION_NOISE):
+        return False, "bruit"
     resp_lower    = f" {response.lower()} "
     context_lower = f" {context.lower()} "
     foreign_in_response = sum(1 for w in _FOREIGN_WORDS if f" {w} " in resp_lower)
@@ -984,7 +1003,8 @@ def _validate_tinyllama_response(response: str, query: str, chunks: List[dict], 
                 _global_metrics["foreign_lang_rejected"] += 1
             return False, "langue_etrangere"
     overlap = _token_overlap(response, context)
-    if overlap > 0.85 and len(response) > 50: return False, f"copie_contexte_{overlap:.2f}"
+    if overlap > 0.85 and len(response) > 50:
+        return False, f"copie_contexte_{overlap:.2f}"
     context_words  = set(context.lower().split())
     response_words = [w for w in response.lower().split() if len(w) > 4]
     if response_words:
@@ -995,7 +1015,7 @@ def _validate_tinyllama_response(response: str, query: str, chunks: List[dict], 
 
 
 # =============================================================
-# GENERATION
+# GENERATION — Qwen1.5-7B
 # =============================================================
 
 def _prepare_generation_inputs(query: str, chunks: List[dict]):
@@ -1006,10 +1026,11 @@ def _prepare_generation_inputs(query: str, chunks: List[dict]):
     if is_multi_crit:
         context = _build_fused_context(chunks, max_chars_per_chunk=500)
     else:
-        context = _build_clean_context(chunks, max_chars=400 if is_multiline else 250)
+        context = _build_clean_context(chunks, max_chars=450 if is_multiline else 300)
     prompt = build_generative_prompt(query, chunks)
+    # Qwen1.5-7B : max_length=768 (plus grand que TinyLlama 512)
     inputs = tokenizer(
-        prompt, return_tensors="pt", truncation=True, max_length=512, padding=False,
+        prompt, return_tensors="pt", truncation=True, max_length=768, padding=False,
     ).to(model.device)
     return model, tokenizer, inputs, max_tokens, context
 
@@ -1020,6 +1041,7 @@ def generate_llm_answer(query: str, chunks: List[dict]) -> str:
         return build_extractive_answer(chunks, query)
     if not chunks:
         return FALLBACK_NO_INFO
+
     if chunks[0].get("is_admin"):
         admin_text   = clean_chunk(chunks[0]["text"])
         admin_answer = _strip_icons(clean_jsonl_artifacts(admin_text))
@@ -1027,32 +1049,45 @@ def generate_llm_answer(query: str, chunks: List[dict]) -> str:
             with _metrics_lock:
                 _global_metrics["admin_direct_count"] += 1
             return admin_answer
+
     if _is_multi_criteria_query(query):
         fused = fuse_chunks_answer(chunks, query)
         if fused and fused != FALLBACK_NO_INFO:
             return fused
+
     try:
         model, tokenizer, inputs, max_tokens, context = _prepare_generation_inputs(query, chunks)
         t_prefill = time.time()
         with torch.no_grad():
             out = model.generate(
-                **inputs, max_new_tokens=max_tokens,
-                do_sample=DO_SAMPLE, repetition_penalty=REPETITION_PENALTY,
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=DO_SAMPLE,
+                repetition_penalty=REPETITION_PENALTY,
                 pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id, use_cache=True,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
             )
-        gen_ms = int((time.time() - t_prefill) * 1000)
+        gen_ms    = int((time.time() - t_prefill) * 1000)
         tokens_out = out.shape[1] - inputs["input_ids"].shape[1]
         with _metrics_lock:
             _global_metrics["generation_times_ms"].append(gen_ms)
             _global_metrics["tokens_generated"].append(tokens_out)
+
         response = tokenizer.decode(
             out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
         ).strip()
-        response = re.sub(r"<\|.*?\|>", "", response).strip()
-        response = re.sub(r"^(?:assistant|Assistant)\s*:\s*", "", response).strip()
+
+        # Nettoyage spécifique Qwen1.5 :
+        # 1. Supprimer tokens ChatML résiduels
+        response = re.sub(r'<\|im_start\|>.*', '', response, flags=re.DOTALL).strip()
+        response = re.sub(r'<\|im_end\|>.*',   '', response, flags=re.DOTALL).strip()
+        # 2. Supprimer le préfixe "assistant" éventuel
+        response = re.sub(r'^(?:assistant|Assistant)\s*[:\n]\s*', '', response).strip()
+        # 3. Nettoyage général
         response = clean_jsonl_artifacts(response)
         response = _strip_icons(response)
+
         is_list      = any(kw in normalize_query(query.lower()) for kw in _LIST_TRIGGERS)
         is_multiline = _is_multiline_query(query)
         is_mc        = _is_multi_criteria_query(query)
@@ -1060,6 +1095,7 @@ def generate_llm_answer(query: str, chunks: List[dict]) -> str:
         sentences    = re.split(r'(?<=[.!?])\s+', response)
         if len(sentences) > max_sent:
             response = " ".join(sentences[:max_sent])
+
         if is_truncated(response):
             with _metrics_lock:
                 _global_metrics["truncated_fallback_count"] += 1
@@ -1068,27 +1104,30 @@ def generate_llm_answer(query: str, chunks: List[dict]) -> str:
                 if fused and fused != FALLBACK_NO_INFO:
                     return fused
             return build_extractive_answer(chunks, query)
-        valid, reason = _validate_tinyllama_response(response, query, chunks, context)
+
+        valid, reason = _validate_qwen_response(response, query, chunks, context)
         if not valid:
+            logger.warning("[VALID] Réponse rejetée : %s", reason)
             with _metrics_lock:
                 _global_metrics["low_coverage_fallback"] += 1
             return build_extractive_answer(chunks, query)
+
         with _metrics_lock:
             _global_metrics["reformulation_count"] += 1
         return response
+
     except Exception as e:
-        logger.error("[GEN] Erreur : %s -> extractif", e)
+        logger.error("[GEN] Erreur Qwen1.5 : %s -> extractif", e)
         return build_extractive_answer(chunks, query)
 
 
 # =============================================================
-# RAG — ChromaDB
+# RAG — ChromaDB (identique TinyLlama)
 # =============================================================
 
 _collection  = None
 _embed_model = None
 _embed_lock  = threading.Lock()
-
 
 def _get_embed_model():
     global _embed_model
@@ -1097,9 +1136,8 @@ def _get_embed_model():
             from sentence_transformers import SentenceTransformer
             logger.info("[EMBED] Chargement encodeur : %s", EMBED_MODEL)
             _embed_model = SentenceTransformer(EMBED_MODEL)
-            logger.info("[EMBED] Encodeur pret.")
+            logger.info("[EMBED] Encodeur prêt.")
         return _embed_model
-
 
 def init_rag():
     global _collection
@@ -1109,11 +1147,9 @@ def init_rag():
     _get_embed_model()
     logger.info("ChromaDB — %d chunks / '%s'", _collection.count(), COLLECTION_NAME)
 
-
 def rag_search(query: str, top_k: int = TOP_K) -> List[dict]:
     encoder = _get_embed_model()
     q_emb   = encoder.encode([query], convert_to_numpy=True).tolist()
-
     results = _collection.query(
         query_embeddings=q_emb,
         n_results=min(top_k * 3, _collection.count()),
@@ -1141,8 +1177,8 @@ def rag_search(query: str, top_k: int = TOP_K) -> List[dict]:
         if is_admin: admin_entries.append(entry)
         else:        non_admin_entries.append(entry)
     non_admin_entries.sort(key=lambda x: x["score_raw"], reverse=True)
-    topk_threshold = (non_admin_entries[TOP_K-1]["score_raw"]
-                      if len(non_admin_entries) >= TOP_K else 0.0)
+    topk_threshold = (non_admin_entries[top_k-1]["score_raw"]
+                      if len(non_admin_entries) >= top_k else 0.0)
     for entry in admin_entries:
         raw         = entry["score_raw"]
         fixed_boost = min(1.0, raw + ADMIN_SCORE_BOOST)
@@ -1209,61 +1245,19 @@ def check_admin_enrichment_direct(query: str, threshold: float = ADMIN_DIRECT_TH
         return best_answer
     return None
 
-
-# =============================================================
-# [FIX-2] Filtre de cohérence post-retrieval
-# =============================================================
-
-def _chunks_are_coherent(hits: List[dict], query: str) -> bool:
-    """
-    Vérifie que le top chunk a une overlap lexicale minimale avec la query.
-    Évite les faux positifs où un chunk sémantiquement proche mais thématiquement
-    hors-sujet remonte en tête (ex: requête sur solde data → chunk sur concours).
-    """
-    if not hits:
-        return False
-    # Mots de la query (longueur > 3, hors stopwords légers)
-    _stop = {"pour","dans","avec","comment","quel","quels","quelle","quelles",
-             "faut","taper","voir","faire","avoir","etre","veux","vouloir"}
-    query_words = {
-        w for w in normalize_query(query.lower()).split()
-        if len(w) > 3 and w not in _stop
-    }
-    if not query_words:
-        return True  # query trop courte ou vide → on laisse passer
-    top_text = normalize_query(hits[0]["text"].lower())
-    overlap  = sum(1 for w in query_words if w in top_text) / len(query_words)
-    if overlap < COHERENCE_OVERLAP_MIN:
-        logger.warning(
-            "[FIX2-COHERENCE] Chunk rejeté (overlap=%.2f < %.2f) pour query='%s' | chunk='%s'",
-            overlap, COHERENCE_OVERLAP_MIN, query[:60], hits[0]["text"][:60]
-        )
-        with _metrics_lock:
-            _global_metrics["coherence_rejected_count"] += 1
-        return False
-    return True
-
-
 def _select_chunks_for_query(query: str, query_processed: str, lang: str):
     if _is_multi_criteria_query(query):
         hits = rag_search_multi_criteria(query, query_processed)
     else:
         hits = rag_search_best(query, query_processed)
-
     confidence         = hits[0]["score"] if hits else 0.0
     adaptive_threshold = get_adaptive_threshold(query)
     rag_used           = confidence >= adaptive_threshold
-
-    # [FIX-2] Filtre de cohérence post-retrieval
-    if rag_used and hits and not hits[0].get("is_admin"):
-        if not _chunks_are_coherent(hits, query):
-            rag_used = False
-
     return hits, confidence, adaptive_threshold, rag_used
 
 
 # =============================================================
-# SQLITE
+# SQLITE (identique TinyLlama)
 # =============================================================
 
 _db_lock = threading.Lock()
@@ -1331,7 +1325,7 @@ def init_db():
         ]:
             try: conn.execute(sql)
             except Exception: pass
-    logger.info("DB initialisee : %s", DB_PATH)
+    logger.info("DB initialisée : %s", DB_PATH)
 
 def save_message(sid, role, content):
     with _db_lock:
@@ -1381,6 +1375,7 @@ class ChatResponse(BaseModel):
     confidence:       float
     response_time_ms: int
     mode:             str
+    model:            str = "qwen1.5-7b"   # Champ supplémentaire vs TinyLlama
 
 class FeedbackRequest(BaseModel):
     session_id:    str
@@ -1403,28 +1398,30 @@ class RagEntryRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("=" * 55)
-    logger.info("  Chatbot Tunisie Telecom — TinyLlama fp16  v2.17")
+    logger.info("=" * 60)
+    logger.info("  Chatbot Tunisie Telecom — Qwen1.5-7B-Chat")
     logger.info("  ChromaDB : %s / collection : %s", CHROMA_DB_DIR, COLLECTION_NAME)
-    logger.info("  Modele   : %s", MODEL_DIR)
+    logger.info("  Modèle   : %s", MODEL_DIR)
     logger.info("  DB       : %s", DB_PATH)
-    logger.info("=" * 55)
+    logger.info("  Port     : %d", API_PORT)
+    logger.info("=" * 60)
     init_db()
     init_auth_db()
     init_rag()
     if not EXTRACTIVE_MODE:
-        logger.info("Chargement TinyLlama fp16...")
+        logger.info("Chargement Qwen1.5-7B-Chat fp16 (~14 GB VRAM)...")
         try:
             init_model()
             threading.Thread(target=model_watchdog, daemon=True).start()
         except Exception as e:
-            logger.error("Echec chargement modele : %s — mode extractif", e)
+            logger.error("Échec chargement modèle : %s — mode extractif", e)
     yield
-    logger.info("API arretee")
+    logger.info("API Qwen1.5 arrêtée")
 
 app = FastAPI(
-    title="Chatbot Tunisie Telecom — TinyLlama",
-    version="2.17.0",
+    title="Chatbot Tunisie Telecom — Qwen1.5-7B",
+    version="1.0.0",
+    description="API RAG avec Qwen1.5-7B-Chat fine-tuné sur le corpus Tunisie Telecom",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -1465,7 +1462,7 @@ async def chat(request: ChatRequest):
     # 2. Hors sujet
     if not is_telecom_related(query):
         log_unanswered(session_id, query, "hors_sujet", is_telecom=False)
-        answer  = ("Je suis l'assistant Tunisie Telecom et je reponds uniquement "
+        answer  = ("Je suis l'assistant Tunisie Telecom et je réponds uniquement "
                    "aux questions sur nos offres et services.")
         elapsed = int((time.time() - t0) * 1000)
         save_message(session_id, "user",      query)
@@ -1511,7 +1508,7 @@ async def chat(request: ChatRequest):
         logger.info("[CHUNK-%d] score=%.3f | %s | '%s'",
                     i+1, h["score"], h["filename"], h["text"][:60])
 
-    # 5. Generation de la reponse
+    # 5. Génération de la réponse
     if rag_used and chunks_for_answer and chunks_for_answer[0].get("is_admin"):
         answer      = _strip_icons(clean_jsonl_artifacts(clean_chunk(chunks_for_answer[0]["text"])))
         answer_mode = "admin_direct"
@@ -1585,7 +1582,7 @@ async def chat(request: ChatRequest):
 @app.post("/feedback", tags=["Feedback"])
 async def feedback_endpoint(req: FeedbackRequest):
     if req.rating not in (1, -1):
-        raise HTTPException(400, "rating doit etre 1 ou -1")
+        raise HTTPException(400, "rating doit être 1 ou -1")
     with _db_lock:
         with get_db() as conn:
             conn.execute(
@@ -1599,22 +1596,15 @@ async def feedback_endpoint(req: FeedbackRequest):
         _global_metrics[key] = _global_metrics.get(key, 0) + 1
     return {"status": "ok"}
 
-
 @app.get("/feedback/stats", tags=["Feedback"])
 async def feedback_stats():
     with get_db() as conn:
-        total = conn.execute(
-            "SELECT COUNT(*) as c FROM feedback"
-        ).fetchone()["c"]
-        pos = conn.execute(
-            "SELECT COUNT(*) as c FROM feedback WHERE rating=1"
-        ).fetchone()["c"]
-        neg = conn.execute(
-            "SELECT COUNT(*) as c FROM feedback WHERE rating=-1"
-        ).fetchone()["c"]
+        total  = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"]
+        pos    = conn.execute("SELECT COUNT(*) as c FROM feedback WHERE rating=1").fetchone()["c"]
+        neg    = conn.execute("SELECT COUNT(*) as c FROM feedback WHERE rating=-1").fetchone()["c"]
         recent = conn.execute(
-            "SELECT session_id, rating, comment, user_question, "
-            "bot_answer, timestamp FROM feedback ORDER BY timestamp DESC LIMIT 50"
+            "SELECT session_id, rating, comment, user_question, bot_answer, timestamp "
+            "FROM feedback ORDER BY timestamp DESC LIMIT 50"
         ).fetchall()
     return {
         "total":             total,
@@ -1652,31 +1642,31 @@ async def clear_history(session_id: str):
 # AUTH ROUTES
 # =============================================================
 
-@app.post("/auth/register", tags=["Auth"])
+@app.post("/auth/register",     tags=["Auth"])
 async def auth_register(req: RegisterRequest):
     return await run_in_threadpool(register_route, req)
 
-@app.post("/auth/verify", tags=["Auth"])
+@app.post("/auth/verify",       tags=["Auth"])
 async def auth_verify(req: VerifyRequest):
     return await run_in_threadpool(verify_route, req)
 
-@app.post("/auth/login", tags=["Auth"])
+@app.post("/auth/login",        tags=["Auth"])
 async def auth_login(req: LoginRequest):
     return await run_in_threadpool(login_route, req)
 
-@app.post("/auth/resend", tags=["Auth"])
+@app.post("/auth/resend",       tags=["Auth"])
 async def auth_resend(req: ResendRequest):
     return await run_in_threadpool(resend_route, req)
 
-@app.post("/auth/check-email", tags=["Auth"])
+@app.post("/auth/check-email",  tags=["Auth"])
 async def auth_check_email(req: CheckEmailRequest):
     return await check_email_route(req)
 
-@app.get("/auth/me", tags=["Auth"])
+@app.get("/auth/me",            tags=["Auth"])
 async def auth_me(user: dict = Depends(require_auth)):
     return me_route(user)
 
-@app.post("/auth/logout", tags=["Auth"])
+@app.post("/auth/logout",       tags=["Auth"])
 async def auth_logout(authorization: str = Header(None)):
     return await run_in_threadpool(logout_route, authorization)
 
@@ -1727,31 +1717,20 @@ async def rag_entries(limit: int = 100):
 
 
 # =============================================================
-# ADMIN — CONVERSATIONS STATS
+# ADMIN — STATS CONVERSATIONS
 # =============================================================
 
 @app.get("/admin/conversations/stats", tags=["Admin"])
 async def conversation_stats(limit: int = Query(default=1000, ge=1, le=5000)):
     with get_db() as conn:
-        total_msgs = conn.execute(
-            "SELECT COUNT(*) as c FROM conversations"
-        ).fetchone()["c"]
-        total_sessions = conn.execute(
-            "SELECT COUNT(DISTINCT session_id) as c FROM conversations"
-        ).fetchone()["c"]
-        role_dist = conn.execute(
-            "SELECT role, COUNT(*) as c FROM conversations GROUP BY role"
-        ).fetchall()
-        hors_sujet = conn.execute(
-            "SELECT COUNT(*) as c FROM unanswered_questions WHERE reason='hors_sujet'"
-        ).fetchone()["c"]
-        unanswered_total = conn.execute(
-            "SELECT COUNT(*) as c FROM unanswered_questions"
-        ).fetchone()["c"]
-        recent = conn.execute(
+        total_msgs     = conn.execute("SELECT COUNT(*) as c FROM conversations").fetchone()["c"]
+        total_sessions = conn.execute("SELECT COUNT(DISTINCT session_id) as c FROM conversations").fetchone()["c"]
+        role_dist      = conn.execute("SELECT role, COUNT(*) as c FROM conversations GROUP BY role").fetchall()
+        hors_sujet     = conn.execute("SELECT COUNT(*) as c FROM unanswered_questions WHERE reason='hors_sujet'").fetchone()["c"]
+        unanswered_total = conn.execute("SELECT COUNT(*) as c FROM unanswered_questions").fetchone()["c"]
+        recent         = conn.execute(
             "SELECT session_id, COUNT(*) as msg_count, MAX(timestamp) as last_msg "
-            "FROM conversations GROUP BY session_id "
-            "ORDER BY last_msg DESC LIMIT ?", (limit,)
+            "FROM conversations GROUP BY session_id ORDER BY last_msg DESC LIMIT ?", (limit,)
         ).fetchall()
     return {
         "total_messages":    total_msgs,
@@ -1780,30 +1759,29 @@ async def get_metrics():
     m.pop("tokens_generated", [])
     return {
         **m,
-        "rag_rate":               m["rag_used_count"] / n if n > 0 else 0,
-        "avg_latency_ms":         m["total_latency_ms"] / n if n > 0 else 0,
-        "avg_confidence":         sum(conf) / len(conf) if conf else 0,
-        "model_loaded":           model_is_loaded(),
-        "extractive_mode":        EXTRACTIVE_MODE,
-        "collection":             COLLECTION_NAME,
-        "chroma_dir":             CHROMA_DB_DIR,
-        "model_dir":              MODEL_DIR,
-        # v2.17 nouveaux compteurs
-        "coherence_rejected":     m.get("coherence_rejected_count", 0),
-        "fuzzy_correction_blocked": m.get("fuzzy_correction_blocked", 0),
-        "timestamp":              datetime.now().isoformat(),
+        "rag_rate":        m["rag_used_count"] / n if n > 0 else 0,
+        "avg_latency_ms":  m["total_latency_ms"] / n if n > 0 else 0,
+        "avg_confidence":  sum(conf) / len(conf) if conf else 0,
+        "model_loaded":    model_is_loaded(),
+        "model_name":      "qwen1.5-7b",
+        "extractive_mode": EXTRACTIVE_MODE,
+        "collection":      COLLECTION_NAME,
+        "chroma_dir":      CHROMA_DB_DIR,
+        "model_dir":       MODEL_DIR,
+        "timestamp":       datetime.now().isoformat(),
     }
 
-@app.get("/health", tags=["Systeme"])
+@app.get("/health", tags=["Système"])
 async def health():
     n_chunks = _collection.count() if _collection else 0
     with get_db() as conn:
-        n_msgs  = conn.execute("SELECT COUNT(*) as c FROM conversations").fetchone()["c"]
-        n_sess  = conn.execute("SELECT COUNT(DISTINCT session_id) as c FROM conversations").fetchone()["c"]
-        n_fb    = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"]
-        n_rag   = conn.execute("SELECT COUNT(*) as c FROM rag_enrichments").fetchone()["c"]
+        n_msgs = conn.execute("SELECT COUNT(*) as c FROM conversations").fetchone()["c"]
+        n_sess = conn.execute("SELECT COUNT(DISTINCT session_id) as c FROM conversations").fetchone()["c"]
+        n_fb   = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"]
+        n_rag  = conn.execute("SELECT COUNT(*) as c FROM rag_enrichments").fetchone()["c"]
     return {
         "status":          "ok" if n_chunks > 0 else "degraded",
+        "model":           "qwen1.5-7b-chat",
         "model_loaded":    model_is_loaded(),
         "extractive_mode": EXTRACTIVE_MODE,
         "rag_chunks":      n_chunks,
@@ -1823,8 +1801,8 @@ async def unanswered(limit: int = 50, reason: Optional[str] = None):
         if reason:
             rows = conn.execute(
                 "SELECT id, session_id, question, reason, is_telecom, timestamp "
-                "FROM unanswered_questions WHERE reason=? "
-                "ORDER BY timestamp DESC LIMIT ?", (reason, limit)).fetchall()
+                "FROM unanswered_questions WHERE reason=? ORDER BY timestamp DESC LIMIT ?",
+                (reason, limit)).fetchall()
         else:
             rows = conn.execute(
                 "SELECT id, session_id, question, reason, is_telecom, timestamp "
@@ -1837,7 +1815,11 @@ async def root():
     html_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(html_path):
         return FileResponse(html_path)
-    return {"message": "Chatbot Tunisie Telecom API v2.17 — TinyLlama fp16"}
+    return {
+        "message": "Chatbot Tunisie Telecom API — Qwen1.5-7B-Chat",
+        "version": "1.0.0",
+        "docs":    "/docs",
+    }
 
 
 # =============================================================
@@ -1846,12 +1828,14 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    print("=" * 55)
-    print("  Chatbot Tunisie Telecom — TinyLlama fp16  v2.17")
+    print("=" * 60)
+    print("  Chatbot Tunisie Telecom — Qwen1.5-7B-Chat  v1.0")
     print(f"  ChromaDB  : {CHROMA_DB_DIR} / {COLLECTION_NAME}")
-    print(f"  Modele    : {MODEL_DIR}")
+    print(f"  Modèle    : {MODEL_DIR}")
+    print(f"  Base      : {BASE_MODEL}")
     print(f"  DB        : {DB_PATH}")
-    print(f"  Mode      : {'extractif' if EXTRACTIVE_MODE else 'generatif'}")
+    print(f"  Mode      : {'extractif' if EXTRACTIVE_MODE else 'génératif (ChatML)'}")
     print(f"  Port      : {API_PORT}")
-    print("=" * 55)
+    print(f"  VRAM req. : ~14 GB fp16 (ou ~5 GB QLoRA 4-bit)")
+    print("=" * 60)
     uvicorn.run(app, host=API_HOST, port=API_PORT, reload=False, log_level="info")
