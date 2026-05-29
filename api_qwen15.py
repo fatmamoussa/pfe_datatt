@@ -65,8 +65,8 @@ from auth_sqlite import (
 # =============================================================
 # CONFIG — Qwen1.5-7B-Chat
 # =============================================================
-MODEL_DIR       = os.environ.get("MODEL_DIR_QWEN", "models/qwen15-tt-merged")
-BASE_MODEL      = "Qwen/Qwen1.5-7B-Chat"
+MODEL_DIR       = os.environ.get("MODEL_DIR_QWEN", "models/qwen15-1b8-tt-merged")
+BASE_MODEL      = "Qwen/Qwen1.5-1.8B-Chat"
 EXTRACTIVE_MODE = os.environ.get("EXTRACTIVE_MODE", "false").lower() == "true"
 
 # Qwen1.5-7B génère mieux → on peut se permettre plus de tokens

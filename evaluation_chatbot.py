@@ -2,28 +2,25 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================
-evaluation_chatbot.py — Évaluation Phi-3.5 vs TinyLlama vs Qwen1.5-7B
+evaluation_tiny_vs_qwen.py — Évaluation TinyLlama vs Qwen
 Projet : Chatbot Tunisie Telecom — PFE Cycle Ingénieur IA
 
-ADAPTÉ AU FORMAT CHUNKS (texte brut) :
-  - test.json  : liste de chunks PDF  { chunk_id, file_name,
-                   year, month, chunk_index, text }
-  - Questions  : générées automatiquement depuis chaque chunk
-  - Référence  : le texte du chunk lui-même
-  - Métriques  : Hit-Rate RAG, ROUGE-L, Faithfulness, etc.
-
 UTILISATION :
-  python evaluation_chatbot.py --all                    # évaluer les 3 modèles
-  python evaluation_chatbot.py --both                   # Phi vs TinyLlama (compat. ancien)
-  python evaluation_chatbot.py --model tinyllama
-  python evaluation_chatbot.py --model qwen
-  python evaluation_chatbot.py --all --n 50
-  python evaluation_chatbot.py --all --no-injected
-  python evaluation_chatbot.py --all \
-      --phi-url   http://localhost:8000 \
-      --tiny-url  http://localhost:8001 \
-      --qwen-url  http://localhost:8002 \
-      --test-file data/test.json
+  # Comparer les 2 modèles (recommandé)
+  python evaluation_tiny_vs_qwen.py --both
+
+  # Avec options
+  python evaluation_tiny_vs_qwen.py --both --n 30 --no-injected
+
+  # Un seul modèle
+  python evaluation_tiny_vs_qwen.py --model tinyllama
+  python evaluation_tiny_vs_qwen.py --model qwen
+
+  # Ports et fichiers personnalisés
+  python evaluation_tiny_vs_qwen.py --both --tiny-url http://localhost:8001 --qwen-url http://localhost:8002 --test-file data/test.json --output data/eval_tiny_vs_qwen.json --n 30
+
+POWERSHELL (tout sur une ligne) :
+  python evaluation_tiny_vs_qwen.py --both --tiny-url http://localhost:8001 --qwen-url http://localhost:8002 --test-file data/test.json --output data/eval_tiny_vs_qwen.json --n 30 --no-injected
 =============================================================
 """
 
@@ -33,16 +30,15 @@ from typing import List, Dict, Optional
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
-API_PHI        = "http://localhost:8000"
 API_TINYLLAMA  = "http://localhost:8001"
-API_QWEN       = "http://localhost:8002"   # ← Qwen1.5-7B
+API_QWEN       = "http://localhost:8002"
 TEST_FILE      = "data/test.json"
-OUTPUT_REPORT  = "data/evaluation_report.json"
+OUTPUT_REPORT  = "data/eval_tiny_vs_qwen.json"
 TOP_K          = 3
 N_QUESTIONS    = 999
 
 # ─────────────────────────────────────────────────────────────
-# QUESTIONS HORS-SUJET (classification is_telecom)
+# QUESTIONS HORS-SUJET
 # ─────────────────────────────────────────────────────────────
 OUT_OF_SCOPE_QUESTIONS = [
     "Quelle est la météo à Tunis aujourd'hui ?",
@@ -64,7 +60,7 @@ OUT_OF_SCOPE_QUESTIONS = [
 N_INJECTED_OUTSCOPE = 15
 
 # ─────────────────────────────────────────────────────────────
-# COULEURS
+# COULEURS TERMINAL
 # ─────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
 YELLOW = "\033[93m"
@@ -89,9 +85,9 @@ _STOP = {
     "commercial","source","information","direction","marketing","contexte",
     "description","clients","client","tous","tout","toute","leurs","leur",
     "cette","plus","mais","aussi","donc","ainsi","alors","après","avant",
-    "selon","sans","lors","entre","depuis","chaque","dont","dont","comme",
+    "selon","sans","lors","entre","depuis","chaque","dont","comme",
     "très","même","fait","faire","peut","doit","sera","sont","avoir",
-    "être","avoir","page","note","date","lancement","version","offre",
+    "être","page","note","date","lancement","version","offre",
 }
 
 def _parse_filename_topic(file_name: str) -> str:
@@ -109,8 +105,8 @@ def _parse_filename_topic(file_name: str) -> str:
             name = name[len(prefix):]
             break
     name = re.sub(r'[-_]\d{2}[-_]\d{2}[-_]\d{4}.*$', '', name)
-    name = re.sub(r'[-_]\d{8}.*$', '',                  name)
-    name = re.sub(r'[-_][Vv]\d+.*$', '',                 name)
+    name = re.sub(r'[-_]\d{8}.*$', '', name)
+    name = re.sub(r'[-_][Vv]\d+.*$', '', name)
     name = re.sub(r'[-_]+', ' ', name)
     name = re.sub(r'([a-zàâéèêëîïôùûüç])([A-ZÀÂÉÈÊËÎÏÔÙÛÜ])', r'\1 \2', name)
     name = re.sub(r'([A-ZÀÂÉÈÊËÎÏÔÙÛÜ]{2,})([A-ZÀÂÉÈÊËÎÏÔÙÛÜ][a-zàâéèêëîïôùûüç])', r'\1 \2', name)
@@ -223,9 +219,9 @@ def load_test_dataset(
             skipped += 1
             continue
 
-        question  = _generate_question(fn, text)
-        keywords  = _extract_keywords(fn, text)
-        category  = _derive_category(fn)
+        question = _generate_question(fn, text)
+        keywords = _extract_keywords(fn, text)
+        category = _derive_category(fn)
 
         examples.append({
             "id":               len(examples) + 1,
@@ -380,9 +376,18 @@ def context_relevance(sources: List[Dict], question: str) -> float:
         return 0.0
     rel = sum(
         1 for src in sources
-        if any(w in (_source_text(src)) for w in q_words)
+        if any(w in _source_text(src) for w in q_words)
     )
     return rel / len(sources)
+
+
+def chunk_exact_hit(sources: List[Dict], chunk_id: str) -> float:
+    if not chunk_id or not sources:
+        return 0.0
+    for src in sources[:TOP_K]:
+        if src.get("chunk_id", "") == chunk_id:
+            return 1.0
+    return 0.0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -431,15 +436,6 @@ def faithfulness(answer: str, sources: List[Dict]) -> float:
     if not words:
         return 0.5
     return sum(1 for w in words if w in ctx) / len(words)
-
-
-def chunk_exact_hit(sources: List[Dict], chunk_id: str) -> float:
-    if not chunk_id or not sources:
-        return 0.0
-    for src in sources[:TOP_K]:
-        if src.get("chunk_id", "") == chunk_id:
-            return 1.0
-    return 0.0
 
 
 def length_score(answer: str) -> float:
@@ -512,17 +508,16 @@ def evaluate_model(
         print(f"\n  {RED}ABANDON : API inaccessible sur {api_base}{RESET}")
         return {}
 
-    results        = []
-    rag_ms         = []
-    gen_ms         = []
-    times          = []
-    rag_used_n     = 0
-    telecom_ok     = 0
-    hallucin_n     = 0
-    exact_hits     = []
-    preds_tc       = []
-    refs_tc        = []
-    cat_stats      = {}
+    results    = []
+    rag_ms     = []
+    gen_ms     = []
+    times      = []
+    rag_used_n = 0
+    telecom_ok = 0
+    hallucin_n = 0
+    preds_tc   = []
+    refs_tc    = []
+    cat_stats  = {}
 
     gen_n     = 0
     ext_n     = 0
@@ -551,7 +546,7 @@ def evaluate_model(
         is_tc    = data["is_telecom"]
         mode     = data["mode"]
 
-        if mode == "generative" or mode == "generative_rag":
+        if mode in ("generative", "generative_rag"):
             gen_n += 1
         elif mode.startswith("extractive"):
             ext_n += 1
@@ -583,13 +578,11 @@ def evaluate_model(
         rm = {}
         if item["is_telecom"] and sources:
             eh = chunk_exact_hit(sources, item.get("chunk_id", ""))
-            exact_hits.append(eh)
-
             if item["source_keywords"]:
                 rm = {
-                    "hit_rate":          hit_rate(sources,  item["source_keywords"]),
-                    "mrr":               mrr(sources,       item["source_keywords"]),
-                    "precision_k":       precision_k(sources,item["source_keywords"]),
+                    "hit_rate":          hit_rate(sources,   item["source_keywords"]),
+                    "mrr":               mrr(sources,        item["source_keywords"]),
+                    "precision_k":       precision_k(sources, item["source_keywords"]),
                     "context_relevance": context_relevance(sources, item["question"]),
                     "chunk_exact_hit":   eh,
                 }
@@ -655,17 +648,18 @@ def evaluate_model(
     n   = len(test_data)
     acc = telecom_ok / n if n else 0
 
+    # ── Affichage résultats ──
     print(f"\n{'='*65}")
     print(f"  RÉSULTATS — {model_name}")
     print(f"{'='*65}")
 
     print(f"\n  Classification télécom / hors-sujet")
-    pm("Accuracy classification",    acc,                         good=0.90, warn=0.75)
-    pm("Taux RAG activé",            rag_used_n/n if n else 0,    good=0.70, warn=0.50)
+    pm("Accuracy classification", acc,                       good=0.90, warn=0.75)
+    pm("Taux RAG activé",         rag_used_n/n if n else 0,  good=0.70, warn=0.50)
 
-    hr = hallucin_n/n if n else 0
+    hr = hallucin_n / n if n else 0
     c  = GREEN if hr <= 0.02 else YELLOW if hr <= 0.05 else RED
-    print(f"  [{'OK' if hr<=0.02 else '!!' }] {'Taux hallucinations':<42} {c}{hr:.4f}{RESET}  (↓ souhaité)")
+    print(f"  [{'OK' if hr<=0.02 else '!!'}] {'Taux hallucinations':<42} {c}{hr:.4f}{RESET}  (↓ souhaité)")
 
     n_answered = len(results)
     print(f"\n  Modes de génération  (sur {n_answered} réponses obtenues)")
@@ -735,10 +729,10 @@ def evaluate_model(
     if gen_ms:
         print(f"\n  Qualité de génération  (sur {len(gen_ms)} questions télécom)")
         for k, label, g, w in [
-            ("rouge_l",          "ROUGE-L",            0.25, 0.12),
-            ("keyword_coverage", "Keyword Coverage",    0.55, 0.35),
-            ("faithfulness",     "Faithfulness",        0.40, 0.25),
-            ("length_score",     "Length Score",        0.80, 0.50),
+            ("rouge_l",          "ROUGE-L",           0.25, 0.12),
+            ("keyword_coverage", "Keyword Coverage",  0.55, 0.35),
+            ("faithfulness",     "Faithfulness",      0.40, 0.25),
+            ("length_score",     "Length Score",      0.80, 0.50),
         ]:
             vs = [m[k] for m in gen_ms if k in m]
             if vs:
@@ -762,8 +756,8 @@ def evaluate_model(
             nc      = s["n"]
             cls_pct = 100 * s["classif_ok"] / nc if nc else 0
             rag_pct = 100 * s["rag_used"]   / nc if nc else 0
-            rl      = s["rouge_l_sum"]  / nc if nc else 0
-            kw      = s["kw_cov_sum"]   / nc if nc else 0
+            rl      = s["rouge_l_sum"] / nc if nc else 0
+            kw      = s["kw_cov_sum"]  / nc if nc else 0
             ha      = s["hallucin"]
             gn      = s["gen_n"]
             en      = s["ext_n"]
@@ -786,9 +780,9 @@ def evaluate_model(
 
     gs    = statistics.mean(scores) if scores else 0
     grade = (
-        "Excellent"          if gs >= 0.70 else
-        "Très satisfaisant"  if gs >= 0.60 else
-        "Satisfaisant"       if gs >= 0.55 else
+        "Excellent"         if gs >= 0.70 else
+        "Très satisfaisant" if gs >= 0.60 else
+        "Satisfaisant"      if gs >= 0.55 else
         "À améliorer"
     )
 
@@ -801,9 +795,9 @@ def evaluate_model(
         return statistics.mean(vs) if vs else 0.0
 
     rag_avg = {k: avg(rag_ms, k) for k in
-               ["hit_rate","mrr","precision_k","context_relevance","chunk_exact_hit"]}
+               ["hit_rate", "mrr", "precision_k", "context_relevance", "chunk_exact_hit"]}
     gen_avg = {k: avg(gen_ms, k) for k in
-               ["rouge_l","keyword_coverage","faithfulness","length_score"]}
+               ["rouge_l", "keyword_coverage", "faithfulness", "length_score"]}
 
     return {
         "model_name":         model_name,
@@ -830,25 +824,27 @@ def evaluate_model(
             "no_info_rate":    round(noi_rate, 4),
             "extractive_subtypes": ext_subtypes,
         },
-        "rag_avg":            rag_avg,
-        "gen_avg":            gen_avg,
-        "bert_score":         bert,
-        "category_stats":     cat_stats,
-        "per_question":       results,
+        "rag_avg":        rag_avg,
+        "gen_avg":        gen_avg,
+        "bert_score":     bert,
+        "category_stats": cat_stats,
+        "per_question":   results,
     }
 
 
 # ═══════════════════════════════════════════════════════════════
-# TABLEAU COMPARATIF — 2 MODÈLES
+# TABLEAU COMPARATIF — TinyLlama vs Qwen
 # ═══════════════════════════════════════════════════════════════
 
-def compare_two(r1: Dict, r2: Dict):
-    n1, n2 = r1["model_name"], r2["model_name"]
-    W = 18
+def compare_tiny_vs_qwen(r_tiny: Dict, r_qwen: Dict):
+    n1 = r_tiny["model_name"]
+    n2 = r_qwen["model_name"]
+    W  = 20
 
-    print(f"\n{'='*72}")
+    print(f"\n{'='*75}")
     print(f"  TABLEAU COMPARATIF — {n1}  vs  {n2}")
-    print(f"{'='*72}")
+    print(f"  PFE Cycle Ingénieur IA — Chatbot Tunisie Telecom")
+    print(f"{'='*75}")
     print(f"\n  {'Métrique':<34} {n1:>{W}} {n2:>{W}}")
     print(f"  {'─'*34} {'─'*W} {'─'*W}")
 
@@ -862,218 +858,199 @@ def compare_two(r1: Dict, r2: Dict):
             b1, b2 = v1 < v2, v2 < v1
         else:
             b1, b2 = v1 > v2, v2 > v1
-        s1, s2 = " ◀" if b1 else "", " ◀" if b2 else ""
-        e1 = (1 - v1/max(v1,v2,0.001)) if lower_better else v1
-        e2 = (1 - v2/max(v1,v2,0.001)) if lower_better else v2
+        s1 = " ◀" if b1 else ""
+        s2 = " ◀" if b2 else ""
+        e1 = (1 - v1 / max(v1, v2, 0.001)) if lower_better else v1
+        e2 = (1 - v2 / max(v1, v2, 0.001)) if lower_better else v2
         c1, c2 = color(e1, good, warn), color(e2, good, warn)
-        r = RESET
         print(
             f"  {label:<34} "
-            f"{c1}{f'{v1:{fmt}}{s1}':>{W}}{r} "
-            f"{c2}{f'{v2:{fmt}}{s2}':>{W}}{r}"
+            f"{c1}{f'{v1:{fmt}}{s1}':>{W}}{RESET} "
+            f"{c2}{f'{v2:{fmt}}{s2}':>{W}}{RESET}"
         )
 
-    print(f"\n  ── Métriques RAG ──────────────────────────────────")
-    row("Hit Rate@3",         get(r1,"rag_avg","hit_rate"),          get(r2,"rag_avg","hit_rate"),          good=0.70, warn=0.50)
-    row("MRR",                get(r1,"rag_avg","mrr"),               get(r2,"rag_avg","mrr"),               good=0.65, warn=0.45)
-    row("Precision@3",        get(r1,"rag_avg","precision_k"),       get(r2,"rag_avg","precision_k"),       good=0.55, warn=0.35)
-    row("Context Relevance",  get(r1,"rag_avg","context_relevance"), get(r2,"rag_avg","context_relevance"), good=0.60, warn=0.40)
-    row("Chunk Exact Hit",    get(r1,"rag_avg","chunk_exact_hit"),   get(r2,"rag_avg","chunk_exact_hit"),   good=0.40, warn=0.20)
-    print(f"\n  ── Qualité de génération ──────────────────────────")
-    row("ROUGE-L",            get(r1,"gen_avg","rouge_l"),           get(r2,"gen_avg","rouge_l"),           good=0.25, warn=0.12)
-    row("Keyword Coverage",   get(r1,"gen_avg","keyword_coverage"),  get(r2,"gen_avg","keyword_coverage"),  good=0.55, warn=0.35)
-    row("Faithfulness",       get(r1,"gen_avg","faithfulness"),      get(r2,"gen_avg","faithfulness"),      good=0.40, warn=0.25)
-    row("Length Score",       get(r1,"gen_avg","length_score"),      get(r2,"gen_avg","length_score"),      good=0.80, warn=0.50)
-    print(f"\n  ── Sémantique (BERTScore) ─────────────────────────")
-    row("BERTScore F1",       get(r1,"bert_score","f1"),             get(r2,"bert_score","f1"),             good=0.65, warn=0.50)
-    row("BERTScore Prec.",    get(r1,"bert_score","precision"),      get(r2,"bert_score","precision"),      good=0.65, warn=0.50)
-    row("BERTScore Recall",   get(r1,"bert_score","recall"),         get(r2,"bert_score","recall"),         good=0.65, warn=0.50)
-    print(f"\n  ── Modes de génération ────────────────────────────")
+    print(f"\n  ── Métriques RAG ─────────────────────────────────────")
+    row("Hit Rate@3",
+        get(r_tiny, "rag_avg", "hit_rate"),
+        get(r_qwen, "rag_avg", "hit_rate"),
+        good=0.70, warn=0.50)
+    row("MRR",
+        get(r_tiny, "rag_avg", "mrr"),
+        get(r_qwen, "rag_avg", "mrr"),
+        good=0.65, warn=0.45)
+    row("Precision@3",
+        get(r_tiny, "rag_avg", "precision_k"),
+        get(r_qwen, "rag_avg", "precision_k"),
+        good=0.55, warn=0.35)
+    row("Context Relevance",
+        get(r_tiny, "rag_avg", "context_relevance"),
+        get(r_qwen, "rag_avg", "context_relevance"),
+        good=0.60, warn=0.40)
+    row("Chunk Exact Hit",
+        get(r_tiny, "rag_avg", "chunk_exact_hit"),
+        get(r_qwen, "rag_avg", "chunk_exact_hit"),
+        good=0.40, warn=0.20)
+
+    print(f"\n  ── Qualité de génération ─────────────────────────────")
+    row("ROUGE-L",
+        get(r_tiny, "gen_avg", "rouge_l"),
+        get(r_qwen, "gen_avg", "rouge_l"),
+        good=0.25, warn=0.12)
+    row("Keyword Coverage",
+        get(r_tiny, "gen_avg", "keyword_coverage"),
+        get(r_qwen, "gen_avg", "keyword_coverage"),
+        good=0.55, warn=0.35)
+    row("Faithfulness",
+        get(r_tiny, "gen_avg", "faithfulness"),
+        get(r_qwen, "gen_avg", "faithfulness"),
+        good=0.40, warn=0.25)
+    row("Length Score",
+        get(r_tiny, "gen_avg", "length_score"),
+        get(r_qwen, "gen_avg", "length_score"),
+        good=0.80, warn=0.50)
+
+    print(f"\n  ── Sémantique (BERTScore) ────────────────────────────")
+    row("BERTScore F1",
+        get(r_tiny, "bert_score", "f1"),
+        get(r_qwen, "bert_score", "f1"),
+        good=0.65, warn=0.50)
+    row("BERTScore Precision",
+        get(r_tiny, "bert_score", "precision"),
+        get(r_qwen, "bert_score", "precision"),
+        good=0.65, warn=0.50)
+    row("BERTScore Recall",
+        get(r_tiny, "bert_score", "recall"),
+        get(r_qwen, "bert_score", "recall"),
+        good=0.65, warn=0.50)
+
+    print(f"\n  ── Modes de génération ───────────────────────────────")
     row("Taux génératif (%)",
-        get(r1,"generation_modes","generative_rate")*100,
-        get(r2,"generation_modes","generative_rate")*100,
+        get(r_tiny, "generation_modes", "generative_rate") * 100,
+        get(r_qwen, "generation_modes", "generative_rate") * 100,
         good=60.0, warn=40.0, fmt=".1f")
     row("Taux extractif / fallback (%)",
-        get(r1,"generation_modes","extractive_rate")*100,
-        get(r2,"generation_modes","extractive_rate")*100,
+        get(r_tiny, "generation_modes", "extractive_rate") * 100,
+        get(r_qwen, "generation_modes", "extractive_rate") * 100,
         good=80.0, warn=60.0, fmt=".1f", lower_better=True)
     row("Taux no-info (%)",
-        get(r1,"generation_modes","no_info_rate")*100,
-        get(r2,"generation_modes","no_info_rate")*100,
+        get(r_tiny, "generation_modes", "no_info_rate") * 100,
+        get(r_qwen, "generation_modes", "no_info_rate") * 100,
         good=90.0, warn=80.0, fmt=".1f", lower_better=True)
-    print(f"\n  ── Système ────────────────────────────────────────")
-    row("Accuracy classif.",  r1["accuracy"],           r2["accuracy"],           good=0.90, warn=0.75)
-    row("Taux RAG activé",    r1["rag_rate"],           r2["rag_rate"],           good=0.70, warn=0.50)
-    row("Taux hallucinations",r1["hallucination_rate"], r2["hallucination_rate"], good=0.98, warn=0.95, lower_better=True)
-    row("Latence moy. (ms)",  r1["avg_latency_ms"],     r2["avg_latency_ms"],     good=0.5,  warn=0.3,  fmt=".0f", lower_better=True)
-    print(f"\n  ── Score global ───────────────────────────────────")
-    row("Score composite",    r1["global_score"],        r2["global_score"],        good=0.65, warn=0.55)
 
-    winner = n1 if r1["global_score"] >= r2["global_score"] else n2
-    delta  = abs(r1["global_score"] - r2["global_score"])
-    print(f"\n{'='*72}")
-    print(f"  Meilleur : {BOLD}{winner}{RESET}  (+{delta:.4f})")
-    print(f"  {n1:<30} : {r1['grade']}")
-    print(f"  {n2:<30} : {r2['grade']}")
-    print(f"{'='*72}")
+    print(f"\n  ── Système ───────────────────────────────────────────")
+    row("Accuracy classif.",
+        r_tiny["accuracy"],
+        r_qwen["accuracy"],
+        good=0.90, warn=0.75)
+    row("Taux RAG activé",
+        r_tiny["rag_rate"],
+        r_qwen["rag_rate"],
+        good=0.70, warn=0.50)
+    row("Taux hallucinations",
+        r_tiny["hallucination_rate"],
+        r_qwen["hallucination_rate"],
+        good=0.98, warn=0.95, lower_better=True)
+    row("Latence moy. (ms)",
+        r_tiny["avg_latency_ms"],
+        r_qwen["avg_latency_ms"],
+        good=0.5, warn=0.3, fmt=".0f", lower_better=True)
+    row("Latence médiane (ms)",
+        r_tiny["median_latency_ms"],
+        r_qwen["median_latency_ms"],
+        good=0.5, warn=0.3, fmt=".0f", lower_better=True)
 
+    print(f"\n  ── Score global ──────────────────────────────────────")
+    row("Score composite",
+        r_tiny["global_score"],
+        r_qwen["global_score"],
+        good=0.65, warn=0.55)
 
-# ═══════════════════════════════════════════════════════════════
-# TABLEAU COMPARATIF — 3 MODÈLES  ← NOUVEAU
-# ═══════════════════════════════════════════════════════════════
+    # ── Verdict final ──
+    winner = n1 if r_tiny["global_score"] >= r_qwen["global_score"] else n2
+    loser  = n2 if winner == n1 else n1
+    delta  = abs(r_tiny["global_score"] - r_qwen["global_score"])
 
-def compare_three(r1: Dict, r2: Dict, r3: Dict):
-    """
-    Tableau comparatif à 3 colonnes : Phi-3.5 | TinyLlama | Qwen1.5-7B
-    Le meilleur sur chaque ligne est indiqué par ◀
-    """
-    n1, n2, n3 = r1["model_name"], r2["model_name"], r3["model_name"]
-    W = 16
+    print(f"\n{'='*75}")
+    print(f"  VERDICT FINAL — PFE Tunisie Telecom")
+    print(f"  {'─'*73}")
 
-    print(f"\n{'='*80}")
-    print(f"  TABLEAU COMPARATIF — 3 MODÈLES — SOUTENANCE PFE")
-    print(f"{'='*80}")
-    print(f"\n  {'Métrique':<32} {n1:>{W}} {n2:>{W}} {n3:>{W}}")
-    print(f"  {'─'*32} {'─'*W} {'─'*W} {'─'*W}")
+    medals = {
+        n1: "🥇" if r_tiny["global_score"] >= r_qwen["global_score"] else "🥈",
+        n2: "🥇" if r_qwen["global_score"] >  r_tiny["global_score"] else "🥈",
+    }
+    for name, res in [(n1, r_tiny), (n2, r_qwen)]:
+        print(f"  {medals[name]}  {name:<30}  Score: {res['global_score']:.4f}  |  {res['grade']}")
 
-    def get(d, *keys):
-        for k in keys:
-            d = d.get(k, 0) if isinstance(d, dict) else 0
-        return d or 0
+    print(f"\n  Meilleur modèle : {BOLD}{winner}{RESET}  (+{delta:.4f} vs {loser})")
 
-    def row3(label, v1, v2, v3, good=0.7, warn=0.5, fmt=".4f", lower_better=False):
-        vals   = [v1, v2, v3]
-        best   = min(vals) if lower_better else max(vals)
-        marks  = [" ◀" if v == best else "" for v in vals]
-        # Normalise pour la couleur
-        if lower_better:
-            enorm = [(1 - v / max(max(vals), 0.001)) for v in vals]
-        else:
-            enorm = vals
-        cols = [color(e, good, warn) for e in enorm]
-        cells = [
-            f"{cols[i]}{f'{vals[i]:{fmt}}{marks[i]}':>{W}}{RESET}"
-            for i in range(3)
-        ]
-        print(f"  {label:<32} {cells[0]} {cells[1]} {cells[2]}")
+    # ── Analyse qualitative ──
+    print(f"\n  ANALYSE COMPARATIVE")
+    print(f"  {'─'*73}")
 
-    print(f"\n  ── Métriques RAG ──────────────────────────────────────────")
-    row3("Hit Rate@3",
-         get(r1,"rag_avg","hit_rate"),          get(r2,"rag_avg","hit_rate"),          get(r3,"rag_avg","hit_rate"),
-         good=0.70, warn=0.50)
-    row3("MRR",
-         get(r1,"rag_avg","mrr"),               get(r2,"rag_avg","mrr"),               get(r3,"rag_avg","mrr"),
-         good=0.65, warn=0.45)
-    row3("Precision@3",
-         get(r1,"rag_avg","precision_k"),       get(r2,"rag_avg","precision_k"),       get(r3,"rag_avg","precision_k"),
-         good=0.55, warn=0.35)
-    row3("Context Relevance",
-         get(r1,"rag_avg","context_relevance"), get(r2,"rag_avg","context_relevance"), get(r3,"rag_avg","context_relevance"),
-         good=0.60, warn=0.40)
-    row3("Chunk Exact Hit",
-         get(r1,"rag_avg","chunk_exact_hit"),   get(r2,"rag_avg","chunk_exact_hit"),   get(r3,"rag_avg","chunk_exact_hit"),
-         good=0.40, warn=0.20)
+    tiny_score = r_tiny["global_score"]
+    qwen_score = r_qwen["global_score"]
 
-    print(f"\n  ── Qualité de génération ──────────────────────────────────")
-    row3("ROUGE-L",
-         get(r1,"gen_avg","rouge_l"),           get(r2,"gen_avg","rouge_l"),           get(r3,"gen_avg","rouge_l"),
-         good=0.25, warn=0.12)
-    row3("Keyword Coverage",
-         get(r1,"gen_avg","keyword_coverage"),  get(r2,"gen_avg","keyword_coverage"),  get(r3,"gen_avg","keyword_coverage"),
-         good=0.55, warn=0.35)
-    row3("Faithfulness",
-         get(r1,"gen_avg","faithfulness"),      get(r2,"gen_avg","faithfulness"),      get(r3,"gen_avg","faithfulness"),
-         good=0.40, warn=0.25)
-    row3("Length Score",
-         get(r1,"gen_avg","length_score"),      get(r2,"gen_avg","length_score"),      get(r3,"gen_avg","length_score"),
-         good=0.80, warn=0.50)
+    # RAG
+    tiny_hr = get(r_tiny, "rag_avg", "hit_rate")
+    qwen_hr = get(r_qwen, "rag_avg", "hit_rate")
+    rag_winner = n1 if tiny_hr >= qwen_hr else n2
+    print(f"  Retrieval (Hit Rate) : {rag_winner} domine  ({tiny_hr:.3f} vs {qwen_hr:.3f})")
 
-    print(f"\n  ── Sémantique (BERTScore) ─────────────────────────────────")
-    row3("BERTScore F1",
-         get(r1,"bert_score","f1"),             get(r2,"bert_score","f1"),             get(r3,"bert_score","f1"),
-         good=0.65, warn=0.50)
-    row3("BERTScore Precision",
-         get(r1,"bert_score","precision"),      get(r2,"bert_score","precision"),      get(r3,"bert_score","precision"),
-         good=0.65, warn=0.50)
-    row3("BERTScore Recall",
-         get(r1,"bert_score","recall"),         get(r2,"bert_score","recall"),         get(r3,"bert_score","recall"),
-         good=0.65, warn=0.50)
+    # Génération
+    tiny_rl = get(r_tiny, "gen_avg", "rouge_l")
+    qwen_rl = get(r_qwen, "gen_avg", "rouge_l")
+    gen_winner = n1 if tiny_rl >= qwen_rl else n2
+    print(f"  Génération (ROUGE-L) : {gen_winner} domine  ({tiny_rl:.3f} vs {qwen_rl:.3f})")
 
-    print(f"\n  ── Modes de génération ────────────────────────────────────")
-    row3("Taux génératif (%)",
-         get(r1,"generation_modes","generative_rate")*100,
-         get(r2,"generation_modes","generative_rate")*100,
-         get(r3,"generation_modes","generative_rate")*100,
-         good=60.0, warn=40.0, fmt=".1f")
-    row3("Taux extractif / fallback (%)",
-         get(r1,"generation_modes","extractive_rate")*100,
-         get(r2,"generation_modes","extractive_rate")*100,
-         get(r3,"generation_modes","extractive_rate")*100,
-         good=80.0, warn=60.0, fmt=".1f", lower_better=True)
-    row3("Taux no-info (%)",
-         get(r1,"generation_modes","no_info_rate")*100,
-         get(r2,"generation_modes","no_info_rate")*100,
-         get(r3,"generation_modes","no_info_rate")*100,
-         good=90.0, warn=80.0, fmt=".1f", lower_better=True)
+    # Latence
+    lat_winner = n1 if r_tiny["avg_latency_ms"] <= r_qwen["avg_latency_ms"] else n2
+    print(f"  Latence              : {lat_winner} est plus rapide  "
+          f"({r_tiny['avg_latency_ms']:.0f}ms vs {r_qwen['avg_latency_ms']:.0f}ms)")
 
-    print(f"\n  ── Système ────────────────────────────────────────────────")
-    row3("Accuracy classif.",
-         r1["accuracy"],           r2["accuracy"],           r3["accuracy"],
-         good=0.90, warn=0.75)
-    row3("Taux RAG activé",
-         r1["rag_rate"],           r2["rag_rate"],           r3["rag_rate"],
-         good=0.70, warn=0.50)
-    row3("Taux hallucinations",
-         r1["hallucination_rate"], r2["hallucination_rate"], r3["hallucination_rate"],
-         good=0.98, warn=0.95, lower_better=True)
-    row3("Latence moy. (ms)",
-         r1["avg_latency_ms"],     r2["avg_latency_ms"],     r3["avg_latency_ms"],
-         good=0.5, warn=0.3, fmt=".0f", lower_better=True)
-    row3("Latence médiane (ms)",
-         r1["median_latency_ms"],  r2["median_latency_ms"],  r3["median_latency_ms"],
-         good=0.5, warn=0.3, fmt=".0f", lower_better=True)
+    # Hallucinations
+    tiny_h = r_tiny["hallucination_rate"]
+    qwen_h = r_qwen["hallucination_rate"]
+    if tiny_h == qwen_h:
+        print(f"  Hallucinations       : égalité  ({tiny_h:.4f})")
+    else:
+        hal_winner = n1 if tiny_h <= qwen_h else n2
+        print(f"  Hallucinations       : {hal_winner} plus fiable  "
+              f"({tiny_h:.4f} vs {qwen_h:.4f})")
 
-    print(f"\n  ── Score global ───────────────────────────────────────────")
-    row3("Score composite",
-         r1["global_score"],       r2["global_score"],       r3["global_score"],
-         good=0.65, warn=0.55)
+    # Modes
+    tiny_gen_rate = get(r_tiny, "generation_modes", "generative_rate") * 100
+    qwen_gen_rate = get(r_qwen, "generation_modes", "generative_rate") * 100
+    print(f"  Taux génératif LLM   : TinyLlama {tiny_gen_rate:.1f}%  |  Qwen {qwen_gen_rate:.1f}%")
 
-    # Classement final
-    ranked = sorted(
-        [(r1["global_score"], n1, r1["grade"]),
-         (r2["global_score"], n2, r2["grade"]),
-         (r3["global_score"], n3, r3["grade"])],
-        reverse=True
-    )
-    print(f"\n{'='*80}")
-    print(f"  CLASSEMENT FINAL")
-    print(f"  {'─'*78}")
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (score, name, grade) in enumerate(ranked):
-        medal = medals[i] if i < len(medals) else f"  {i+1}."
-        delta = score - ranked[-1][0]
-        delta_str = f"  +{delta:.4f} vs dernier" if i < len(ranked)-1 else ""
-        print(f"  {medal}  {name:<30}  Score: {score:.4f}  |  {grade}{delta_str}")
+    print(f"\n  Conclusion pour la soutenance :")
+    if delta < 0.02:
+        print(f"  → Performance très proche ({delta:.4f} d'écart)")
+        print(f"  → {winner} légèrement supérieur sur le score composite")
+        print(f"  → Avantage décisif à analyser selon le cas d'usage (latence vs qualité)")
+    elif delta < 0.05:
+        print(f"  → {winner} supérieur de {delta:.4f} points")
+        print(f"  → Différence modérée — à mettre en perspective avec les contraintes VRAM")
+    else:
+        print(f"  → {winner} nettement supérieur (+{delta:.4f})")
+        print(f"  → Recommandation claire pour le déploiement")
 
-    print(f"\n  Gagnant absolu : {BOLD}{ranked[0][1]}{RESET}")
-    print(f"{'='*80}")
+    print(f"{'='*75}")
 
-    # Résumé modes par modèle
+    # ── Résumé modes ──
     print(f"\n  RÉSUMÉ MODES DE GÉNÉRATION")
-    print(f"  {'─'*78}")
-    print(f"  {'Mode':<30} {n1:>{W}} {n2:>{W}} {n3:>{W}}")
-    print(f"  {'─'*30} {'─'*W} {'─'*W} {'─'*W}")
+    print(f"  {'─'*73}")
+    print(f"  {'Mode':<35} {n1:>{W}} {n2:>{W}}")
+    print(f"  {'─'*35} {'─'*W} {'─'*W}")
     for label, key in [
-        ("Génératif (n)",   "generative_n"),
-        ("Extractif (n)",   "extractive_n"),
-        ("No-info (n)",     "no_info_n"),
-        ("Autres (n)",      "other_n"),
+        ("Génératif (LLM réussi)",   "generative_n"),
+        ("Extractif (fallback RAG)", "extractive_n"),
+        ("No-info (RAG faible)",     "no_info_n"),
+        ("Autres (hors-sujet...)",   "other_n"),
     ]:
-        v1 = get(r1, "generation_modes", key)
-        v2 = get(r2, "generation_modes", key)
-        v3 = get(r3, "generation_modes", key)
-        print(f"  {label:<30} {str(v1):>{W}} {str(v2):>{W}} {str(v3):>{W}}")
-    print(f"{'='*80}")
+        v1 = get(r_tiny, "generation_modes", key)
+        v2 = get(r_qwen, "generation_modes", key)
+        print(f"  {label:<35} {str(v1):>{W}} {str(v2):>{W}}")
+    print(f"{'='*75}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1082,36 +1059,49 @@ def compare_three(r1: Dict, r2: Dict, r3: Dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Évaluation Chatbot TT — Phi-3.5 vs TinyLlama vs Qwen1.5-7B"
+        description="Évaluation TinyLlama vs Qwen — Chatbot Tunisie Telecom PFE"
     )
-    parser.add_argument("--all",         action="store_true",
-                        help="Évaluer et comparer les 3 modèles (Phi + TinyLlama + Qwen)")
-    parser.add_argument("--both",        action="store_true",
-                        help="Évaluer et comparer Phi vs TinyLlama (compatibilité ancienne version)")
-    parser.add_argument("--model",       choices=["phi", "tinyllama", "qwen"], default="phi",
-                        help="Évaluer un seul modèle")
-    parser.add_argument("--n",           type=int, default=N_QUESTIONS,
-                        help="Nombre de chunks à évaluer (défaut : tout)")
-    parser.add_argument("--no-injected", action="store_true",
-                        help="Ne pas injecter les questions hors-sujet")
-    parser.add_argument("--test-file",   default=TEST_FILE)
-    parser.add_argument("--phi-url",     default=API_PHI)
-    parser.add_argument("--tiny-url",    default=API_TINYLLAMA)
-    parser.add_argument("--qwen-url",    default=API_QWEN,
-                        help=f"URL de l'API Qwen1.5-7B (défaut: {API_QWEN})")
-    parser.add_argument("--output",      default=OUTPUT_REPORT)
+    parser.add_argument(
+        "--both",
+        action="store_true",
+        help="Évaluer et comparer TinyLlama vs Qwen (mode principal)"
+    )
+    parser.add_argument(
+        "--model",
+        choices=["tinyllama", "qwen"],
+        default="tinyllama",
+        help="Évaluer un seul modèle"
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=N_QUESTIONS,
+        help="Nombre de chunks à évaluer (défaut : tout)"
+    )
+    parser.add_argument(
+        "--no-injected",
+        action="store_true",
+        help="Ne pas injecter les questions hors-sujet"
+    )
+    parser.add_argument("--test-file", default=TEST_FILE)
+    parser.add_argument("--tiny-url",  default=API_TINYLLAMA,
+                        help=f"URL API TinyLlama (défaut: {API_TINYLLAMA})")
+    parser.add_argument("--qwen-url",  default=API_QWEN,
+                        help=f"URL API Qwen (défaut: {API_QWEN})")
+    parser.add_argument("--output",    default=OUTPUT_REPORT)
     args = parser.parse_args()
 
-    print("\n" + "="*72)
+    print("\n" + "=" * 75)
     print("  Évaluation Chatbot Tunisie Telecom — PFE")
-    print("  (Dataset : chunks texte brut)")
-    print("="*72)
-    print(f"  Phi-3.5      : {args.phi_url}")
-    print(f"  TinyLlama    : {args.tiny_url}")
-    print(f"  Qwen1.5-7B   : {args.qwen_url}  ← NOUVEAU")
-    print(f"  Dataset      : {args.test_file}")
-    print(f"  Rapport      : {args.output}")
-    print("="*72)
+    print("  TinyLlama-1.1B  vs  Qwen1.5")
+    print("=" * 75)
+    print(f"  TinyLlama : {args.tiny_url}")
+    print(f"  Qwen      : {args.qwen_url}")
+    print(f"  Dataset   : {args.test_file}")
+    print(f"  Rapport   : {args.output}")
+    print(f"  N chunks  : {args.n if args.n < N_QUESTIONS else 'tout'}")
+    print(f"  Hors-sujet: {'non' if args.no_injected else 'oui'}")
+    print("=" * 75)
 
     try:
         import rouge_score  # noqa
@@ -1125,93 +1115,63 @@ def main():
         add_outscope=not args.no_injected,
     )
 
-    print(f"\n  Aperçu des questions générées :")
-    for ex in test_data[:3]:
-        if ex["is_telecom"]:
+    print(f"\n  Aperçu des 3 premières questions générées :")
+    shown = 0
+    for ex in test_data:
+        if ex["is_telecom"] and shown < 3:
             print(f"    [{ex['file_name']}]")
             print(f"    → {ex['question']}")
             print(f"    Mots-clés : {ex['source_keywords']}\n")
+            shown += 1
 
     final = {}
 
-    # ─────────────────────────────────────────
-    # Cas 1 : --all  → évaluer les 3 modèles
-    # ─────────────────────────────────────────
-    if args.all:
-        r_phi  = evaluate_model(test_data, args.phi_url,  "Phi-3.5-mini-FT")
+    # ── Mode --both : TinyLlama puis Qwen, puis comparaison ──
+    if args.both:
+        print(f"\n  Étape 1/2 — Évaluation TinyLlama...")
         r_tiny = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT")
-        r_qwen = evaluate_model(test_data, args.qwen_url, "Qwen1.5-7B-FT")
 
-        valid = {k: v for k, v in {
-            "phi":  r_phi,
-            "tiny": r_tiny,
-            "qwen": r_qwen,
-        }.items() if v}
+        print(f"\n  Étape 2/2 — Évaluation Qwen...")
+        r_qwen = evaluate_model(test_data, args.qwen_url, "Qwen1.5-FT")
 
-        # Comparaisons 2 à 2 si au moins 2 modèles ont répondu
-        available = list(valid.values())
-        if len(available) >= 2:
-            for i in range(len(available)):
-                for j in range(i + 1, len(available)):
-                    compare_two(available[i], available[j])
-
-        # Comparatif 3 colonnes si tous disponibles
-        if len(available) == 3:
-            compare_three(r_phi, r_tiny, r_qwen)
-
-        # Classement global simplifié si certains modèles sont absents
-        if len(available) == 2:
-            m1, m2 = available
-            winner = m1["model_name"] if m1["global_score"] >= m2["global_score"] else m2["model_name"]
-            delta  = abs(m1["global_score"] - m2["global_score"])
-            print(f"\n  Meilleur modèle : {BOLD}{winner}{RESET}  (+{delta:.4f})")
-
-        ranked = sorted(valid.values(), key=lambda x: x["global_score"], reverse=True)
-        final = {
-            "phi35":       r_phi,
-            "tinyllama":   r_tiny,
-            "qwen15":      r_qwen,
-            "ranking": [
-                {"rank": i+1, "model": r["model_name"],
-                 "score": r["global_score"], "grade": r["grade"]}
-                for i, r in enumerate(ranked)
-            ],
-            "winner":       ranked[0]["model_name"] if ranked else "",
-            "generated_at": __import__("datetime").datetime.now().isoformat(),
-        }
-
-    # ─────────────────────────────────────────
-    # Cas 2 : --both  → Phi vs TinyLlama (compat.)
-    # ─────────────────────────────────────────
-    elif args.both:
-        r_phi  = evaluate_model(test_data, args.phi_url,  "Phi-3.5-mini-FT")
-        r_tiny = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT")
-        if r_phi and r_tiny:
-            compare_two(r_phi, r_tiny)
+        if r_tiny and r_qwen:
+            compare_tiny_vs_qwen(r_tiny, r_qwen)
+            winner = (
+                "TinyLlama-1.1B-FT"
+                if r_tiny["global_score"] >= r_qwen["global_score"]
+                else "Qwen1.5-FT"
+            )
             final = {
-                "phi35":     r_phi,
-                "tinyllama": r_tiny,
+                "tinyllama":  r_tiny,
+                "qwen15":     r_qwen,
                 "comparison": {
-                    "winner":     "Phi-3.5-mini-FT" if r_phi["global_score"] >= r_tiny["global_score"] else "TinyLlama-1.1B-FT",
-                    "phi_score":  r_phi["global_score"],
-                    "tiny_score": r_tiny["global_score"],
-                    "delta":      abs(r_phi["global_score"] - r_tiny["global_score"]),
+                    "winner":      winner,
+                    "tiny_score":  r_tiny["global_score"],
+                    "qwen_score":  r_qwen["global_score"],
+                    "delta":       abs(r_tiny["global_score"] - r_qwen["global_score"]),
+                    "tiny_grade":  r_tiny["grade"],
+                    "qwen_grade":  r_qwen["grade"],
                 },
                 "generated_at": __import__("datetime").datetime.now().isoformat(),
             }
+        elif r_tiny:
+            print(f"\n  [WARN] Qwen inaccessible — rapport TinyLlama uniquement")
+            final = {"tinyllama": r_tiny}
+        elif r_qwen:
+            print(f"\n  [WARN] TinyLlama inaccessible — rapport Qwen uniquement")
+            final = {"qwen15": r_qwen}
         else:
-            final = {"phi35": r_phi, "tinyllama": r_tiny}
+            print(f"\n  {RED}ERREUR : aucun modèle n'a répondu{RESET}")
 
-    # ─────────────────────────────────────────
-    # Cas 3 : --model <nom>  → un seul modèle
-    # ─────────────────────────────────────────
-    elif args.model == "tinyllama":
-        final = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT") or {}
+    # ── Mode --model : un seul modèle ──
     elif args.model == "qwen":
-        final = evaluate_model(test_data, args.qwen_url, "Qwen1.5-7B-FT") or {}
+        r_qwen = evaluate_model(test_data, args.qwen_url, "Qwen1.5-FT")
+        final  = r_qwen or {}
     else:
-        final = evaluate_model(test_data, args.phi_url, "Phi-3.5-mini-FT") or {}
+        r_tiny = evaluate_model(test_data, args.tiny_url, "TinyLlama-1.1B-FT")
+        final  = r_tiny or {}
 
+    # ── Sauvegarde rapport JSON ──
     if final:
         os.makedirs(
             os.path.dirname(args.output) if os.path.dirname(args.output) else ".",
