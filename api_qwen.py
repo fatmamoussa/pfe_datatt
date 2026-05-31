@@ -1,6 +1,6 @@
 """
 =============================================================
-API v2.2 — Chatbot Tunisie Telecom — Qwen1.5-7B-Chat
+API v2.3 — Chatbot Tunisie Telecom — Qwen1.5-7B-Chat
 Version finale déploiement PFE
 
 CORRECTIONS v2.2 (sur base v2.1) :
@@ -15,14 +15,14 @@ CORRECTIONS v2.2 (sur base v2.1) :
   - Gestion questions floues télécom : seuil forcé à 0.25 si query vague TT
   - MIN_CONTEXT_COVERAGE abaissé à 0.10
 
-FIX LANGUE ARABE (v2.2-fix) :
-  - build_generative_prompt() accepte lang= ("fr"|"ar")
-  - system_msg injecte l'instruction de langue dans Qwen directement
-  - generate_llm_answer() / generate_llm_answer_stream() propagent lang
-  - _prepare_generation_inputs() propage lang
-  - Route /chat et /chat/stream passent lang aux appels génératifs
-  - translate_french_to_arabic() utilisé SEULEMENT pour modes non-génératifs
-    (extractive, admin_direct, fusion) — pas pour generative_rag
+NOUVEAUTÉS v2.3 — TRADUCTION FR→AR VIA HELSINKI-NLP :
+  - Remplacement de translate_french_to_arabic() (dictionnaire basique)
+    par translate_ar() utilisant Helsinki-NLP/opus-mt-fr-ar (modèle local)
+  - Modèle chargé une seule fois au démarrage (_helsinki_translator)
+  - Fallback automatique sur le dictionnaire si le modèle échoue
+  - Utilisé dans /chat et /chat/stream pour toutes les réponses en arabe
+  - Base de données RAG reste 100% en français (aucun changement)
+  - Installation : pip install transformers sentencepiece sacremoses
 =============================================================
 """
 
@@ -74,6 +74,106 @@ from nlp_multilingual import (
     detect_response_language,
     translate_french_to_arabic,
 )
+
+# =============================================================
+# TRADUCTEUR FR→AR — Helsinki-NLP/opus-mt-fr-ar (modèle local)
+# Chargé une seule fois, utilisé à la place du dictionnaire basique.
+# Fallback automatique sur translate_french_to_arabic() si échec.
+# Installation : pip install transformers sentencepiece sacremoses
+# =============================================================
+
+_helsinki_translator = None
+_helsinki_tokenizer  = None
+_helsinki_lock       = threading.Lock()
+
+def _load_helsinki():
+    """Charge le modèle Helsinki-NLP FR→AR (lazy loading au premier appel)."""
+    global _helsinki_translator, _helsinki_tokenizer
+    if _helsinki_translator is not None:
+        return True
+    with _helsinki_lock:
+        if _helsinki_translator is not None:   # double-check
+            return True
+        try:
+            from transformers import MarianMTModel, MarianTokenizer
+            model_name = "Helsinki-NLP/opus-mt-fr-ar"
+            logging.getLogger(__name__).info(
+                "[HELSINKI] Chargement traducteur FR→AR : %s", model_name)
+            _helsinki_tokenizer  = MarianTokenizer.from_pretrained(model_name)
+            _helsinki_translator = MarianMTModel.from_pretrained(model_name)
+            _helsinki_translator.eval()
+            logging.getLogger(__name__).info("[HELSINKI] Traducteur FR→AR prêt.")
+            return True
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[HELSINKI] Impossible de charger le traducteur : %s "
+                "— fallback dictionnaire.", e)
+            return False
+
+
+def translate_ar(text_fr: str) -> str:
+    """
+    Traduit du français vers l'arabe.
+    Stratégie :
+      1. Helsinki-NLP opus-mt-fr-ar  (modèle local, qualité élevée)
+      2. Fallback : translate_french_to_arabic() (dictionnaire nlp_multilingual)
+
+    Découpe les textes longs en phrases pour rester dans la fenêtre du modèle.
+    """
+    if not text_fr or not text_fr.strip():
+        return text_fr
+
+    logger_h = logging.getLogger(__name__)
+
+    if _load_helsinki():
+        try:
+            import torch as _torch
+            # Découpe en phrases (~500 chars max par segment)
+            sentences = re.split(r'(?<=[.!?\n])\s+', text_fr.strip())
+            segments, current = [], ""
+            for s in sentences:
+                if len(current) + len(s) < 500:
+                    current = (current + " " + s).strip()
+                else:
+                    if current:
+                        segments.append(current)
+                    current = s
+            if current:
+                segments.append(current)
+            if not segments:
+                segments = [text_fr]
+
+            translated_parts = []
+            for seg in segments:
+                inputs = _helsinki_tokenizer(
+                    [seg], return_tensors="pt",
+                    padding=True, truncation=True, max_length=512
+                )
+                with _torch.no_grad():
+                    outputs = _helsinki_translator.generate(
+                        **inputs,
+                        num_beams=4,
+                        max_length=512,
+                        early_stopping=True,
+                    )
+                part = _helsinki_tokenizer.decode(
+                    outputs[0], skip_special_tokens=True)
+                translated_parts.append(part)
+
+            result = " ".join(translated_parts).strip()
+            if result:
+                logger_h.info(
+                    "[HELSINKI] Traduction OK (fr:%d→ar:%d chars)",
+                    len(text_fr), len(result))
+                return result
+        except Exception as e:
+            logger_h.warning(
+                "[HELSINKI] Erreur traduction : %s — fallback dictionnaire", e)
+
+    # Fallback dictionnaire
+    logger_h.info("[HELSINKI] Fallback dictionnaire pour : '%s'", text_fr[:60])
+    return translate_french_to_arabic(text_fr)
+
 
 # =============================================================
 # CONFIG — Qwen1.5
@@ -322,19 +422,28 @@ TELECOM_KEYWORDS = [
     "pays","perdue","position","postpayees","presentation","resilier","reste","social","solutions",
     "sortante","tabdil","tarifs","telephone","trophee","ttcash","urgence","utilisation","via",
     "voix","weekend","zoom",
+    # --- AJOUTS v2.2 pour corriger les cas no_context ---
+    # My TT / application
     "application","appli","telecharger","installer","telechargement","my tt","mytt","app",
     "gerer","compte","mon compte","espace client",
+    # Questions floues / générales
     "offre","service","disponible","avez","faites","proposez","nouveau","nouveaute",
     "probleme","pb","souci","aide","help","question","renseignement","information",
+    # Roaming variantes
     "voyage","voyager","partir","l etranger","a l etranger","depuis l etranger",
     "fonctionne","marche","utiliser","mon telephone",
+    # USSD variantes
     "composer","composez","composant","taper","tapez","code","numero court",
     "activer","activation","menu","*",
+    # Contact / service client
     "contacter","joindre","appeler","conseiller","agent","support","aide","hotline",
     "reclamer","reclamation","plainte",
+    # Portabilité
     "garder","conserver","changer","opérateur","operateur","venir","passer","migrer",
     "numéro","numero",
+    # Hayya / offres jeune
     "jeune","etudiant","jeunes",
+    # SOS
     "epuise","vide","plus de credit","plus internet","avance","demande",
 ]
 
@@ -365,25 +474,37 @@ TELECOM_PRODUCT_NAMES = [
 ]
 
 AR_TELECOM_KEYWORDS = [
+    # Termes généraux
     "\u0627\u0646\u062a\u0631\u0646\u062a", "\u0625\u0646\u062a\u0631\u0646\u062a",
     "\u0647\u0627\u062a\u0641", "\u0631\u0635\u064a\u062f", "\u0634\u062d\u0646",
     "\u0639\u0631\u0636", "\u0639\u0631\u0648\u0636", "\u0627\u0634\u062a\u0631\u0627\u0643",
     "\u062a\u062c\u0648\u0627\u0644", "\u062e\u062f\u0645\u0629",
     "\u062a\u0648\u0646\u0633 \u0644\u0644\u0627\u062a\u0635\u0627\u0644\u0627\u062a",
     "\u062a\u0641\u0639\u064a\u0644", "\u0634\u0628\u0643\u0629", "1298",
+    # Roaming / International
     "\u062a\u062c\u0648\u0627\u0644 \u062f\u0648\u0644\u064a", "\u0627\u0644\u062a\u062c\u0648\u0627\u0644",
     "\u062e\u0627\u0631\u062c", "\u062f\u0648\u0644\u064a",
+    # SOS / Crédit
     "\u0633\u0648\u0633", "\u0631\u0635\u064a\u062f\u064a", "\u0634\u062d\u0646 \u0631\u0635\u064a\u062f\u064a",
+    # Forfait / Pack
     "\u0628\u0627\u0642\u0629", "\u0628\u0627\u0642\u0629 \u0627\u0646\u062a\u0631\u0646\u062a",
     "\u0641\u0648\u0631\u0641\u064a", "\u0628\u0627\u0643",
+    # Fibre / ADSL
     "\u0623\u0644\u064a\u0627\u0641", "\u0627\u0644\u0623\u0644\u064a\u0627\u0641 \u0627\u0644\u0636\u0648\u0626\u064a\u0629",
     "\u0627\u0646\u062a\u0631\u0646\u062a \u0645\u0646\u0632\u0644\u064a",
+    # App My TT
     "\u062a\u0637\u0628\u064a\u0642", "\u0645\u0627\u064a \u062a\u064a \u062a\u064a",
+    # Portabilité
     "\u0631\u0642\u0645\u064a", "\u0627\u0644\u0627\u0646\u062a\u0642\u0627\u0644",
+    # 5G
     "\u062c\u064a\u0644 \u062e\u0627\u0645\u0633", "5g", "5\u062c",
+    # Hayya
     "\u0647\u064a\u0627", "\u0647\u064a\u064a\u0627",
+    # Contact
     "\u062e\u062f\u0645\u0629 \u0639\u0645\u0644\u0627\u0621",
+    # OHMega
     "\u0623\u0648\u0645\u064a\u063a\u0627",
+    # Offres générales
     "\u0643\u064a\u0641\u0627\u0634", "\u0639\u0646\u062f\u0643\u0645", "\u0645\u0627 \u0639\u0646\u062f\u0643\u0645",
 ]
 
@@ -512,7 +633,7 @@ _ICON_PATTERN = re.compile(
 )
 
 # =============================================================
-# CORRECTION AVANCÉE DES FAUTES DE FRAPPE
+# CORRECTION AVANCÉE DES FAUTES DE FRAPPE (FONCTIONNELLE)
 # =============================================================
 
 _SIMILAR_CHARS = {
@@ -569,15 +690,19 @@ def correct_typos_advanced(word: str) -> str:
         return word
     if word in _COMMON_WORDS_FR:
         return word
+    
     for correct, wrongs in _COMMON_MISTAKES.items():
         if word.lower() in wrongs or word.lower() == correct:
             return correct
+    
     if word in CORRECTIONS_DIRECTES:
         return CORRECTIONS_DIRECTES[word]
+    
     cutoff = 78 if len(word) <= 5 else 82
     match = process.extractOne(word.lower(), VOCAB_TELECOM, scorer=fuzz.WRatio, score_cutoff=cutoff)
     if match:
         return match[0]
+    
     normalized = ''.join(_normalize_char(c) for c in word.lower())
     for vocab in VOCAB_TELECOM:
         vocab_norm = ''.join(_normalize_char(c) for c in vocab.lower())
@@ -585,6 +710,7 @@ def correct_typos_advanced(word: str) -> str:
             return vocab
         if fuzz.ratio(normalized, vocab_norm) >= 88:
             return vocab
+    
     if len(word) <= 10:
         best_match = None
         best_score = 0.0
@@ -596,6 +722,7 @@ def correct_typos_advanced(word: str) -> str:
                     best_match = vocab
         if best_match:
             return best_match
+    
     return word
 
 def preprocess_query_advanced(query: str) -> str:
@@ -610,10 +737,13 @@ def preprocess_query_advanced(query: str) -> str:
             continue
         corrected = correct_typos_advanced(w)
         corrected_words.append(corrected)
+    
     corrected_query = " ".join(corrected_words)
+    
     for wrong, right in CORRECTIONS_DIRECTES.items():
         if wrong in corrected_query:
             corrected_query = corrected_query.replace(wrong, right)
+    
     if corrected_query != query.lower():
         logger.info(f"[TYPO] Original: '{query[:80]}' → Corrigé: '{corrected_query[:80]}'")
     return corrected_query
@@ -649,7 +779,7 @@ def correct_telecom_keywords(query: str) -> str:
             corrected.append(word)
     return " ".join(corrected)
 
-def preprocess_query_local(query: str) -> str:
+def preprocess_query(query: str) -> str:
     corrected = preprocess_query_advanced(query)
     normalized = normalize_query(corrected)
     return normalized
@@ -662,6 +792,7 @@ def get_adaptive_threshold(query: str) -> float:
 def detect_theme(question: str) -> str:
     q = normalize_query(question.lower())
     theme_scores: dict = {}
+
     for theme, kws in TELECOM_THEME_KEYWORDS.items():
         score = 0
         for kw in kws:
@@ -669,13 +800,15 @@ def detect_theme(question: str) -> str:
                 score += 2 if len(kw) > 8 else 1
         if score > 0:
             theme_scores[theme] = score
+
     if not theme_scores:
         if any(w in q for w in ["offre", "service", "option", "disponible"]):
             return "offre_vas"
         return "general"
+
     return max(theme_scores, key=theme_scores.get)
 
-def detect_language_simple(text: str) -> str:
+def detect_language(text: str) -> str:
     arabic = len(re.findall(r'[\u0600-\u06FF\u0750-\u077F]', text))
     latin = len(re.findall(r'[a-zA-Z]', text))
     total = arabic + latin
@@ -705,29 +838,39 @@ def _normalize_for_kw(text: str) -> str:
 
 def is_telecom_related(query: str) -> bool:
     q_lower = query.lower()
+    
     for comp in COMPETITOR_KEYWORDS:
         if comp in q_lower:
             if "tunisie telecom" not in q_lower and "tt" not in q_lower:
                 logger.info(f"[ANTI‑HORS‑SUJET] Question concurrente détectée: '{query[:60]}'")
                 return False
-    lang = detect_language_simple(query)
+    
+    # --- Détection arabe améliorée ---
+    lang = detect_language(query)
     if lang in ("ar", "mixed"):
+        # Vérifier les keywords arabes télécom
         if any(kw in query for kw in AR_TELECOM_KEYWORDS):
             return True
+        # Pour "mixed" (ex: "فورفي إنترنت TT كيفاش"), vérifier aussi les mots latins
         if lang == "mixed":
             q_norm = _normalize_for_kw(query)
             q_words = set(q_norm.split())
             for kw in TELECOM_KEYWORDS:
                 if kw in q_words:
                     return True
+        # Questions arabes générales sur les offres/services TT — accepter par défaut
+        # si la question contient des mots interrogatifs arabes + contexte TT implicite
         arabic_question_words = ["كيف", "ما", "هل", "ماذا", "أين", "متى", "كم", "ماهو", "ما هو", "كيفاش"]
         if any(w in query for w in arabic_question_words):
+            # Donner le bénéfice du doute pour les questions arabes courtes (≤10 mots)
             if len(query.split()) <= 10:
                 return True
         return False
+
     q_orig = query.lower()
     q_norm = _normalize_for_kw(query)
     q_words = set(q_norm.split())
+    
     for kw in TELECOM_KEYWORDS:
         if kw in q_words:
             return True
@@ -1050,10 +1193,10 @@ def build_extractive_answer(chunks: List[dict], query: str) -> str:
     if not chunks:
         return FALLBACK_NO_INFO
     BRUIT_DEBUT = ["Marketing", "Contexte", "Description", "Concept", "Source", "Flash", "DCCM", "Cible"]
-
+    
     def phrase_propre(s: str) -> bool:
         return not any(s.strip().startswith(mot) for mot in BRUIT_DEBUT)
-
+    
     for chunk in chunks:
         raw_text = clean_chunk(chunk["text"])
         answer_part = extract_answer_part(raw_text, query)
@@ -1109,20 +1252,27 @@ def _load_model():
     model_path = MODEL_DIR if os.path.isdir(MODEL_DIR) else BASE_MODEL
     logger.info("[MODEL] Chargement Qwen1.5 fp16 : %s", model_path)
     _tokenizer = AutoTokenizer.from_pretrained(
-        model_path, trust_remote_code=True, padding_side="left",
+        model_path,
+        trust_remote_code=True,
+        padding_side="left",
     )
     if _tokenizer.pad_token is None:
         _tokenizer.pad_token = _tokenizer.eos_token
         _tokenizer.pad_token_id = _tokenizer.eos_token_id
+
     device_map = {"": "cuda:0"} if torch.cuda.is_available() else {"": "cpu"}
     _model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.float16, device_map=device_map,
-        trust_remote_code=True, low_cpu_mem_usage=True,
+        model_path,
+        torch_dtype=torch.float16,
+        device_map=device_map,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
     )
     _model.eval()
     _model.config.use_cache = True
     logger.info("[MODEL] Qwen1.5 chargé | device=%s | dtype=%s",
-                next(_model.parameters()).device, next(_model.parameters()).dtype)
+                next(_model.parameters()).device,
+                next(_model.parameters()).dtype)
     if TORCH_COMPILE_ENABLED and torch.cuda.is_available():
         try:
             _model = torch.compile(_model, mode="reduce-overhead")
@@ -1189,7 +1339,6 @@ def init_model():
 
 # =============================================================
 # PROMPT QWEN1.5 — FORMAT CHATML
-# FIX LANGUE : build_generative_prompt accepte lang= ("fr"|"ar"|"mixed")
 # =============================================================
 
 def _build_clean_context(chunks: List[dict], max_chars: int = 300) -> str:
@@ -1204,115 +1353,30 @@ def _build_clean_context(chunks: List[dict], max_chars: int = 300) -> str:
             parts.append(answer_only[:max_chars])
     return " ".join(parts)
 
-
-def translate_with_qwen(text_fr: str, original_query: str) -> str:
-    """
-    Traduit un texte français en arabe via Qwen1.5 (génération native).
-    Utilisé pour les modes extractive/fusion/admin_direct quand lang=="ar".
-    Si le modèle n'est pas chargé, fall back sur translate_french_to_arabic().
-    """
-    try:
-        model, tokenizer = get_model()
-        if model is None or tokenizer is None:
-            return translate_french_to_arabic(text_fr)
-
-        prompt = (
-            f"{IM_START}system\n"
-            "أنت مترجم محترف من الفرنسية إلى العربية الفصحى لشركة تونس للاتصالات. "
-            "قم بترجمة النص التالي إلى العربية الفصحى فقط. لا تضف أي شيء آخر.\n"
-            f"{IM_END}\n"
-            f"{IM_START}user\n"
-            f"ترجم هذا النص إلى العربية:\n{text_fr}\n"
-            f"{IM_END}\n"
-            f"{IM_START}assistant\n"
-        )
-        inputs = tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=768, padding=False
-        ).to(model.device)
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=250,
-                do_sample=False,
-                repetition_penalty=REPETITION_PENALTY,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                use_cache=True,
-            )
-        response = tokenizer.decode(
-            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip()
-        response = re.sub(r'<\|im_start\|>.*', '', response, flags=re.DOTALL).strip()
-        response = re.sub(r'<\|im_end\|>.*', '', response, flags=re.DOTALL).strip()
-        response = re.sub(r'^(?:assistant|Assistant)\s*[:\n]\s*', '', response).strip()
-        if len(response) > 10:
-            logger.info("[QWEN-TRAD] Traduction AR via Qwen (len=%d)", len(response))
-            return response
-    except Exception as e:
-        logger.warning("[QWEN-TRAD] Erreur traduction Qwen : %s — fallback dictionnaire", e)
-    return translate_french_to_arabic(text_fr)
-
-
-def build_generative_prompt(query: str, chunks: List[dict], lang: str = "fr") -> str:
-    """
-    Construit le prompt ChatML pour Qwen1.5.
-    lang : "fr" (défaut) | "ar" | "mixed"
-    → injecte l'instruction de langue directement dans le system_msg
-      afin que Qwen génère nativement dans la bonne langue.
-    """
+def build_generative_prompt(query: str, chunks: List[dict]) -> str:
     is_multiline = _is_multiline_query(query)
     is_list = any(kw in normalize_query(query.lower()) for kw in _LIST_TRIGGERS)
     is_multi_crit = _is_multi_criteria_query(query)
 
-    respond_in_arabic = lang in ("ar", "mixed")
-
     if is_multi_crit:
         context = _build_fused_context(chunks, max_chars_per_chunk=500)
-        instruction = (
-            "أجب في 3 جمل قصيرة وكاملة، جملة لكل معيار مطلوب."
-            if respond_in_arabic else
-            "Réponds en 3 phrases courtes et complètes, une par critère demandé."
-        )
+        instruction = "Réponds en 3 phrases courtes et complètes, une par critère demandé."
     elif is_multiline:
         context = _build_clean_context(chunks, max_chars=450)
-        instruction = (
-            "اشرح في 3 جمل كيفية القيام بذلك."
-            if respond_in_arabic else
-            "Explique en 3 phrases maximum comment faire cela."
-        )
+        instruction = "Explique en 3 phrases maximum comment faire cela."
     elif is_list:
         context = _build_clean_context(chunks, max_chars=450)
-        instruction = (
-            "اذكر النقاط الرئيسية في 3 جمل كحد أقصى."
-            if respond_in_arabic else
-            "Liste les points principaux en 3 phrases maximum."
-        )
+        instruction = "Liste les points principaux en 3 phrases maximum."
     else:
         context = _build_clean_context(chunks, max_chars=300)
-        instruction = (
-            "أجب في جملة أو جملتين قصيرتين وكاملتين."
-            if respond_in_arabic else
-            "Réponds en 1 ou 2 phrases courtes et complètes."
-        )
-
-    if respond_in_arabic:
-        lang_instruction = (
-            "أجب باللغة العربية الفصحى فقط. "
-            "لا تستخدم الفرنسية أو الإنجليزية أبداً. "
-            "لا تستخدم رموزاً أو نقاطاً أو إيموجي."
-        )
-    else:
-        lang_instruction = (
-            "Réponds uniquement en français. "
-            "N'utilise aucun emoji, bullet ou icône."
-        )
+        instruction = "Réponds en 1 ou 2 phrases courtes et complètes."
 
     system_msg = (
-        f"Tu es l'assistant de Tunisie Telecom. "
-        f"Utilise UNIQUEMENT l'information ci-dessous. "
-        f"N'invente rien. {lang_instruction}"
+        "Tu es l'assistant de Tunisie Telecom. "
+        "Utilise UNIQUEMENT l'information ci-dessous. "
+        "N'invente rien. Réponds en français. "
+        "N'utilise aucun emoji, bullet ou icône."
     )
-
     user_msg = (
         f"Information : {context}\n\n"
         f"Question : {query}\n\n"
@@ -1324,7 +1388,6 @@ def build_generative_prompt(query: str, chunks: List[dict], lang: str = "fr") ->
         f"{IM_START}user\n{user_msg}\n{IM_END}\n"
         f"{IM_START}assistant\n"
     )
-
 
 def _token_overlap(text1: str, text2: str) -> float:
     words1 = set(normalize_query(text1.lower()).split())
@@ -1340,16 +1403,19 @@ def _validate_qwen_response(response: str, query: str, chunks: List[dict], conte
         return False, "token_chatml_residuel"
     if _contains_raw_table(response):
         return False, "tableau_brut"
+    
     for sig in HALLUCINATION_SIGNALS:
         if sig in response.lower():
             if sig not in query.lower():
                 logger.warning(f"[VALID] Hallucination concurrente détectée: {sig} dans réponse")
                 return False, "hallucination_concurrent"
+    
     resp_norm = normalize_query(response.lower())
     if any(leak in resp_norm for leak in PROMPT_LEAKS):
         return False, "fuite_prompt"
     if any(n in response.lower() for n in GENERATION_NOISE):
         return False, "bruit"
+    
     resp_lower = f" {response.lower()} "
     context_lower = f" {context.lower()} "
     foreign_in_response = sum(1 for w in _FOREIGN_WORDS if f" {w} " in resp_lower)
@@ -1372,15 +1438,9 @@ def _validate_qwen_response(response: str, query: str, chunks: List[dict], conte
 
 # =============================================================
 # GENERATION — Qwen1.5
-# FIX LANGUE : _prepare_generation_inputs, generate_llm_answer,
-#              generate_llm_answer_stream acceptent lang=
 # =============================================================
 
-def _prepare_generation_inputs(query: str, chunks: List[dict], lang: str = "fr"):
-    """
-    Prépare les inputs pour la génération Qwen1.5.
-    lang est propagé à build_generative_prompt pour injecter l'instruction de langue.
-    """
+def _prepare_generation_inputs(query: str, chunks: List[dict]):
     model, tokenizer = get_model()
     max_tokens = estimate_max_tokens(query, chunks)
     is_multi_crit = _is_multi_criteria_query(query)
@@ -1389,19 +1449,14 @@ def _prepare_generation_inputs(query: str, chunks: List[dict], lang: str = "fr")
         context = _build_fused_context(chunks, max_chars_per_chunk=500)
     else:
         context = _build_clean_context(chunks, max_chars=450 if is_multiline else 300)
-    prompt = build_generative_prompt(query, chunks, lang=lang)
+    prompt = build_generative_prompt(query, chunks)
     inputs = tokenizer(
         prompt, return_tensors="pt", truncation=True, max_length=768, padding=False,
     ).to(model.device)
     return model, tokenizer, inputs, max_tokens, context
 
-
 @torch.inference_mode()
-def generate_llm_answer(query: str, chunks: List[dict], lang: str = "fr") -> str:
-    """
-    Génère une réponse avec Qwen1.5.
-    lang : "fr" | "ar" | "mixed" — détermine la langue de la réponse générée.
-    """
+def generate_llm_answer(query: str, chunks: List[dict]) -> str:
     model, tokenizer = get_model()
     if model is None or tokenizer is None:
         return build_extractive_answer(chunks, query)
@@ -1422,7 +1477,7 @@ def generate_llm_answer(query: str, chunks: List[dict], lang: str = "fr") -> str
             return fused
 
     try:
-        model, tokenizer, inputs, max_tokens, context = _prepare_generation_inputs(query, chunks, lang=lang)
+        model, tokenizer, inputs, max_tokens, context = _prepare_generation_inputs(query, chunks)
         t_prefill = time.time()
         with torch.no_grad():
             out = model.generate(
@@ -1482,13 +1537,8 @@ def generate_llm_answer(query: str, chunks: List[dict], lang: str = "fr") -> str
         logger.error("[GEN] Erreur Qwen1.5 : %s -> extractif", e)
         return build_extractive_answer(chunks, query)
 
-
 @torch.inference_mode()
-def generate_llm_answer_stream(query: str, chunks: List[dict], lang: str = "fr"):
-    """
-    Génère une réponse en streaming avec Qwen1.5.
-    lang : "fr" | "ar" | "mixed" — détermine la langue de la réponse générée.
-    """
+def generate_llm_answer_stream(query: str, chunks: List[dict]):
     from transformers import TextIteratorStreamer
     if not chunks:
         yield FALLBACK_NO_INFO
@@ -1507,7 +1557,7 @@ def generate_llm_answer_stream(query: str, chunks: List[dict], lang: str = "fr")
             yield fused
             return
     try:
-        model, tokenizer, inputs, max_tokens, context = _prepare_generation_inputs(query, chunks, lang=lang)
+        model, tokenizer, inputs, max_tokens, context = _prepare_generation_inputs(query, chunks)
         streamer = TextIteratorStreamer(
             tokenizer, skip_special_tokens=True, skip_prompt=True, timeout=60.0)
         gen_kwargs = dict(
@@ -1579,25 +1629,24 @@ def rag_search(query: str, top_k: int = TOP_K) -> List[dict]:
         n_results=min(top_k * 3, _collection.count()),
         include=["documents", "metadatas", "distances"]
     )
-    _BENCHMARK_FILES = {"benchmark-waffi.pdf", "benchmark_waffi.pdf", "benchmark waffi"}
     admin_entries = []
     non_admin_entries = []
     for doc, meta, dist in zip(
-        results["documents"][0], results["metadatas"][0], results["distances"][0]
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0]
     ):
         raw_score = round(1 - dist, 4)
         fname = meta.get("file_name", meta.get("filename", ""))
         is_admin = fname == "admin_enrichment"
-        fname_lower = fname.lower()
-        if any(bm in fname_lower for bm in _BENCHMARK_FILES):
-            logger.debug("[FILTER] Chunk benchmark écarté: %s", fname)
-            continue
-        if any(sig in doc.lower() for sig in ["ooredoo", "orange tunisie"]):
-            raw_score = max(0.0, raw_score - 0.50)
         entry = {
-            "text": doc, "score_raw": raw_score, "score": raw_score,
-            "filename": fname, "year": meta.get("year", ""),
-            "theme": meta.get("theme", ""), "is_admin": is_admin,
+            "text": doc,
+            "score_raw": raw_score,
+            "score": raw_score,
+            "filename": fname,
+            "year": meta.get("year", ""),
+            "theme": meta.get("theme", ""),
+            "is_admin": is_admin,
         }
         if is_admin:
             admin_entries.append(entry)
@@ -1708,7 +1757,10 @@ def _chunks_are_coherent(hits: List[dict], query: str) -> bool:
     top_text = normalize_query(hits[0]["text"].lower())
     overlap = sum(1 for w in query_words if w in top_text) / len(query_words)
     if overlap < COHERENCE_OVERLAP_MIN:
-        logger.warning("[COHERENCE] Chunk rejeté (overlap=%.2f) pour query='%s'", overlap, query[:60])
+        logger.warning(
+            "[COHERENCE] Chunk rejeté (overlap=%.2f) pour query='%s'",
+            overlap, query[:60]
+        )
         with _metrics_lock:
             _global_metrics["coherence_rejected_count"] += 1
         return False
@@ -1723,6 +1775,7 @@ def _rerank_for_price_query(query: str, hits: List[dict]) -> List[dict]:
         hits.sort(key=lambda x: x["score"], reverse=True)
         logger.info("[RERANK] Boost tarifaire appliqué")
 
+    # Boost USSD : si la question parle de code/composition/activation internet
     ussd_keywords = ["ussd", "code", "composer", "composez", "activer", "*140", "140", "activation internet"]
     if any(uk in query.lower() for uk in ussd_keywords):
         for h in hits:
@@ -1731,51 +1784,13 @@ def _rerank_for_price_query(query: str, hits: List[dict]) -> List[dict]:
         hits.sort(key=lambda x: x["score"], reverse=True)
         logger.info("[RERANK] Boost USSD appliqué")
 
-    mytt_keywords = ["application", "appli", "my tt", "mytt", "telecharger", "installer", "app",
-                     "تطبيق", "ماي تي تي", "أحمّل"]
+    # Boost My TT / application
+    mytt_keywords = ["application", "appli", "my tt", "mytt", "telecharger", "installer", "app"]
     if any(mk in query.lower() for mk in mytt_keywords):
         for h in hits:
-            if any(m in h["text"].lower() for m in ["my tt", "mytt", "application", "appli", "portail", "sajalni"]):
-                h["score"] = min(1.0, h["score"] + 0.15)
-        hits.sort(key=lambda x: x["score"], reverse=True)
-        logger.info("[RERANK] Boost MyTT appliqué")
-
-    ohmega_keywords = ["ohmega", "ohméga", "oh mega", "أوميغا"]
-    if any(ok in query.lower() for ok in ohmega_keywords):
-        for h in hits:
-            text_l = h["text"].lower()
-            if "ohmega" in text_l or "oh!mega" in text_l or "ohméga" in text_l:
-                h["score"] = min(1.0, h["score"] + 0.20)
-            elif "giga rapido" in text_l:
-                h["score"] = max(0.0, h["score"] - 0.30)
-        hits.sort(key=lambda x: x["score"], reverse=True)
-        logger.info("[RERANK] Boost OHMega appliqué")
-
-    roaming_keywords = ["roaming", "itinerance", "international", "etranger", "التجوال", "تجوال"]
-    if any(rk in query.lower() for rk in roaming_keywords):
-        for h in hits:
-            text_l = h["text"].lower()
-            fname_l = h["filename"].lower()
-            if "benchmark" not in fname_l and ("roaming" in text_l or "itinerance" in text_l):
+            if any(m in h["text"].lower() for m in ["my tt", "mytt", "application", "appli", "portail"]):
                 h["score"] = min(1.0, h["score"] + 0.08)
         hits.sort(key=lambda x: x["score"], reverse=True)
-        logger.info("[RERANK] Boost Roaming TT appliqué")
-
-    rapido_keywords = ["rapido", "رابيدو", "rapdio"]
-    if any(rk in query.lower() for rk in rapido_keywords):
-        for h in hits:
-            if "rapido" in h["text"].lower() and "giga rapido" not in h["text"].lower():
-                h["score"] = min(1.0, h["score"] + 0.12)
-        hits.sort(key=lambda x: x["score"], reverse=True)
-        logger.info("[RERANK] Boost Rapido appliqué")
-
-    fibre_keywords = ["fibre", "ftth", "fibre optique", "الألياف", "ألياف"]
-    if any(fk in query.lower() for fk in fibre_keywords):
-        for h in hits:
-            if "fibre" in h["text"].lower() or "ftth" in h["text"].lower():
-                h["score"] = min(1.0, h["score"] + 0.10)
-        hits.sort(key=lambda x: x["score"], reverse=True)
-        logger.info("[RERANK] Boost Fibre appliqué")
 
     return hits
 
@@ -1784,17 +1799,17 @@ def _select_chunks_for_query(query: str, query_processed: str, lang: str):
         hits = rag_search_multi_criteria(query, query_processed)
     else:
         hits = rag_search_best(query, query_processed)
-
+    
     hits = _rerank_for_price_query(query, hits)
-
+    
     confidence = hits[0]["score"] if hits else 0.0
     adaptive_threshold = get_adaptive_threshold(query)
     rag_used = confidence >= adaptive_threshold
-
+    
     if rag_used and hits and not hits[0].get("is_admin"):
         if not _chunks_are_coherent(hits, query):
             rag_used = False
-
+    
     if not rag_used:
         simplified = re.sub(
             r"(c'est quoi|quel est|comment|combien co[uû]te|parlez-moi de|je veux|peux-tu|"
@@ -1802,6 +1817,7 @@ def _select_chunks_for_query(query: str, query_processed: str, lang: str):
             r"avez-vous|est-ce que|est ce que|vous avez|vous faites|vous proposez)\s+",
             "", query.lower()
         )
+        # Aussi retirer les mots parasites en début
         simplified = re.sub(r"^(le |la |les |un |une |des |mon |ma |mes )", "", simplified).strip()
         if simplified != query.lower() and len(simplified.split()) >= 2:
             logger.info("[RAG] Second essai avec requête simplifiée: '%s'", simplified[:60])
@@ -1811,14 +1827,16 @@ def _select_chunks_for_query(query: str, query_processed: str, lang: str):
                 hits2 = rag_search_best(simplified, simplified)
             hits2 = _rerank_for_price_query(simplified, hits2)
             conf2 = hits2[0]["score"] if hits2 else 0.0
-            if conf2 > confidence + 0.03:
+            if conf2 > confidence + 0.03:  # seuil abaissé de 0.08 à 0.03
                 hits = hits2
                 confidence = conf2
                 rag_used = confidence >= adaptive_threshold
                 logger.info("[RAG] Second essai réussi: conf %.3f > %.3f", confidence, adaptive_threshold)
                 with _metrics_lock:
                     _global_metrics["second_rag_success"] += 1
-
+    
+    # --- Gestion spéciale des questions floues télécom ---
+    # Si la question est courte/vague mais clairement télécom, baisser encore le seuil
     _VAGUE_TELECOM_PATTERNS = [
         r"(vous avez|avez.vous|vous faites|vous proposez).{0,30}(offres?|services?|forfaits?)",
         r"^(offres?|services?|forfaits?)\s*\??$",
@@ -1829,8 +1847,10 @@ def _select_chunks_for_query(query: str, query_processed: str, lang: str):
         r"koi.{0,10}(tt|neuf|chez)",
     ]
     _VAGUE_COMPILED = [re.compile(p, re.IGNORECASE) for p in _VAGUE_TELECOM_PATTERNS]
+
     is_vague_telecom = any(p.search(query) for p in _VAGUE_COMPILED)
     if is_vague_telecom and hits and not rag_used:
+        # Pour une question vague mais télécom, accepter le meilleur résultat RAG
         confidence_floor = 0.25
         if hits[0]["score"] >= confidence_floor:
             rag_used = True
@@ -2099,16 +2119,18 @@ class RagEntryRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("=" * 60)
-    logger.info("  Chatbot Tunisie Telecom — Qwen1.5  v2.2")
+    logger.info("  Chatbot Tunisie Telecom — Qwen1.5  v2.3")
     logger.info("  ChromaDB : %s / collection : %s", CHROMA_DB_DIR, COLLECTION_NAME)
     logger.info("  Modèle   : %s", MODEL_DIR)
     logger.info("  DB       : %s", DB_PATH)
     logger.info("  Port     : %d", API_PORT)
-    logger.info("  [v2.2] Fix langue arabe : prompt bilingue natif Qwen")
+    logger.info("  [v2.3] Traducteur FR→AR Helsinki-NLP intégré")
     logger.info("=" * 60)
     init_db()
     init_auth_db()
     init_rag()
+    # Pré-chargement du traducteur Helsinki FR→AR
+    threading.Thread(target=_load_helsinki, daemon=True).start()
     if not EXTRACTIVE_MODE:
         logger.info("Chargement Qwen1.5 fp16...")
         try:
@@ -2117,7 +2139,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Échec chargement modèle : %s — mode extractif", e)
     yield
-    logger.info("API Qwen1.5 v2.2 arrêtée")
+    logger.info("API Qwen1.5 v2.3 arrêtée")
 
 app = FastAPI(
     title="Chatbot Tunisie Telecom — Qwen1.5 v2.2",
@@ -2169,31 +2191,39 @@ async def auth_logout(authorization: str = Header(None)):
 
 def process_query_nlp(raw_query: str) -> tuple:
     """
-    Traite la requête avec NLP multilingue.
-    Retourne (query_processed, lang_enum, lang_str).
+    Traite la requête avec NLP multilingue
+    
+    Retourne:
+        - query_processed (str): Requête en français (traduction si arabe)
+        - detected_lang_enum (Language): Langue détectée (NLP)
+        - original_lang (str): 'ar' ou 'fr' (pour historique/réponse)
     """
     if not USE_NLP_DETECTION:
-        original_lang = detect_language_simple(raw_query)
-        return preprocess_query_local(raw_query), Language.FRENCH, original_lang
-
+        # Mode classique (ancien comportement)
+        original_lang = detect_language(raw_query)
+        return preprocess_query(raw_query), Language.FRENCH, original_lang
+    
     try:
         from nlp_multilingual import preprocess_query as preprocess_nlp
+        
+        # Détection + Traduction NLP
         processed_query, lang_enum = preprocess_nlp(raw_query)
-        final_query = preprocess_query_local(processed_query)
+        
+        # Normaliser avec preprocessing local
+        final_query = preprocess_query(processed_query)
         original_lang = "ar" if lang_enum == Language.ARABIC else "fr"
+        
         if lang_enum == Language.ARABIC:
-            logger.info(f"[NLP-AR→FR] '{raw_query[:40]}' → '{final_query[:40]}'")
+            logger.info(f"[NLP-AR→FR] '{raw_query[:40]}...' → '{final_query[:40]}...'")
+        
         return final_query, lang_enum, original_lang
     except Exception as e:
         logger.warning(f"[NLP] Erreur traitement: {e} - fallback")
-        original_lang = detect_language_simple(raw_query)
-        return preprocess_query_local(raw_query), Language.FRENCH, original_lang
+        original_lang = detect_language(raw_query)
+        return preprocess_query(raw_query), Language.FRENCH, original_lang
 
 # =============================================================
 # ROUTE PRINCIPALE — /chat
-# FIX LANGUE :
-#   - lang transmis à generate_llm_answer
-#   - translate_french_to_arabic() SEULEMENT pour modes non-génératifs
 # =============================================================
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
@@ -2201,16 +2231,17 @@ async def chat(request: ChatRequest):
     t0 = time.time()
     session_id = request.session_id or str(uuid.uuid4())
     raw_query = request.message.strip()
-
+    
     if not raw_query:
         raise HTTPException(400, "Message vide.")
-
+    
+    # =====================================================
     # NLP MULTILINGUE — Détection + Traduction automatique
+    # =====================================================
     query, lang_enum, lang_str = process_query_nlp(raw_query)
-    lang = lang_str
-    logger.info(f"[CHAT-INPUT] Original: '{raw_query[:50]}' | Lang: {lang} | Processed: '{query[:50]}'")
-
-    # --- Greeting ---
+    lang = lang_str  # Pour compatibilité avec le code existant
+    logger.info(f"[CHAT-INPUT] Original: '{raw_query[:50]}...' | Lang: {lang} | Processed: '{query[:50]}...'")
+    
     if is_greeting(raw_query) or is_greeting(query):
         answer = GREETING_RESPONSE_AR if lang == "ar" else GREETING_RESPONSE
         elapsed = int((time.time() - t0) * 1000)
@@ -2225,7 +2256,6 @@ async def chat(request: ChatRequest):
             is_telecom=True, rag_used=False, confidence=1.0,
             response_time_ms=elapsed, mode="greeting", metrics=None)
 
-    # --- Hors-sujet ---
     if not is_telecom_related(raw_query):
         log_unanswered(session_id, raw_query, "hors_sujet", is_telecom=False)
         answer = (HORS_SUJET_RESPONSE_AR if lang == "ar" else
@@ -2243,13 +2273,9 @@ async def chat(request: ChatRequest):
             is_telecom=False, rag_used=False, confidence=0.0,
             response_time_ms=elapsed, mode="hors_sujet", metrics=None)
 
-    # --- Admin enrichissement direct ---
     admin_fuzzy = await run_in_threadpool(check_admin_enrichment_direct, query)
     if admin_fuzzy:
         answer = _strip_icons(admin_fuzzy)
-        # Traduction pour admin_direct si langue arabe (via Qwen natif)
-        if lang == "ar" or lang_enum == Language.ARABIC:
-            answer = translate_with_qwen(answer, raw_query)
         elapsed = int((time.time() - t0) * 1000)
         save_message(session_id, "user", raw_query)
         save_message(session_id, "assistant", answer)
@@ -2267,35 +2293,24 @@ async def chat(request: ChatRequest):
             is_telecom=True, rag_used=True, confidence=1.0,
             response_time_ms=elapsed, mode="admin_direct", metrics=rt_metrics)
 
-    # --- Enrichissement AR→FR pour la recherche ChromaDB ---
+    # Enrichissement AR→FR pour améliorer la recherche dans ChromaDB (chunks en français)
     AR_TO_FR_MAPPING = {
         "إنترنت": "internet", "أنترنت": "internet", "انترنت": "internet",
-        "رصيد": "solde credit recharge", "شحن": "recharge", "رصيدي": "mon solde credit",
-        "أشحن": "recharger recharge", "اشحن": "recharger recharge",
+        "رصيد": "solde credit recharge", "شحن": "recharge",
         "عرض": "offre forfait", "عروض": "offres forfaits",
         "تجوال": "roaming international", "تجوال دولي": "roaming international",
-        "التجوال الدولي": "roaming international activation",
-        "أفعّل": "activer activation", "تفعيل": "activation activer",
         "ألياف": "fibre optique", "الألياف الضوئية": "fibre optique",
-        "انترنت منزلي": "internet fixe adsl waffi", "أنترنت منزلي": "internet fixe adsl waffi",
-        "تطبيق": "application my tt telecharger", "ماي تي تي": "my tt application",
-        "أحمّل": "telecharger installer", "احمل": "telecharger installer",
-        "رقم": "numero portabilite", "رقمي": "mon numero portabilite",
-        "أحتفظ": "conserver garder", "الانتقال": "portabilite migration",
-        "انتقال": "portabilite migration",
-        "أوميغا": "ohmega", "رابيدو": "rapido",
-        "هيا": "hayya", "هييا": "hayya",
+        "تطبيق": "application my tt", "ماي تي تي": "my tt application",
+        "رقم": "numero portabilite", "أوميغا": "ohmega",
+        "رابيدو": "rapido", "هيا": "hayya", "هييا": "hayya",
         "خدمة عملاء": "service client contact 1298",
-        "أتصل": "contacter appeler 1298",
-        "الجيل الخامس": "5g netbox",
-        "باقة": "forfait pack", "باقة الأنترنت": "forfait internet mobile",
-        "سوس": "sos internet", "سوس أنترنت": "sos internet code *150",
+        "الجيل الخامس": "5g", "باقة": "forfait pack",
+        "سوس": "sos internet", "سوس أنترنت": "sos internet",
         "كيفاش": "comment activer", "ما عندكم": "offres services disponibles",
-        "عندكم": "disponible offres", "كود": "code ussd",
-        "الكود": "code ussd activation",
-        "اشتراك": "souscription abonnement", "أشترك": "souscrire abonnement",
-        "الحج": "hajj arabie saoudite promo roaming",
-        "حج": "hajj arabie saoudite roaming",
+        "عندكم": "disponible offres", "انتقال": "portabilite migration",
+        "التجوال الدولي": "roaming international activation",
+        "اشتراك": "souscription abonnement",
+        "كود": "code ussd", "تفعيل": "activation activer",
     }
     search_query = query if lang != "ar" else raw_query
     if lang in ("ar", "mixed"):
@@ -2304,34 +2319,13 @@ async def chat(request: ChatRequest):
             if ar_term in raw_query:
                 extra_terms.append(fr_term)
         if extra_terms:
-            translated_part = query if lang == "mixed" or (query and query != raw_query) else ""
-            search_query = " ".join(extra_terms)
-            if translated_part:
-                search_query = search_query + " " + translated_part
+            search_query = " ".join(extra_terms) + " " + (query if lang == "mixed" else "")
             search_query = search_query.strip()
             logger.info("[AR→FR] Requête enrichie: '%s'", search_query[:80])
-        elif query and query != raw_query:
-            search_query = query
-            logger.info("[AR→FR-NLP] Requête traduite: '%s'", search_query[:80])
 
     hits, confidence, adaptive_threshold, rag_used = await run_in_threadpool(
         _select_chunks_for_query, query, search_query, lang
     )
-
-    # Second fallback arabe : utiliser la query traduite NLP
-    if not rag_used and lang == "ar" and query and query != raw_query:
-        logger.info("[AR-FALLBACK] Second essai RAG avec query traduite NLP: '%s'", query[:60])
-        hits2, conf2, thresh2, rag2 = await run_in_threadpool(
-            _select_chunks_for_query, query, query, "fr"
-        )
-        if rag2 or conf2 > confidence:
-            hits, confidence, adaptive_threshold, rag_used = hits2, conf2, thresh2, rag2
-            logger.info("[AR-FALLBACK] Succès avec query traduite: conf=%.3f", conf2)
-
-    # Seuil abaissé pour l'arabe
-    if not rag_used and lang == "ar" and hits and hits[0]["score"] >= 0.28:
-        rag_used = True
-        logger.info("[AR-SEUIL] Seuil abaissé pour question arabe: conf=%.3f >= 0.28", hits[0]["score"])
 
     if not rag_used:
         log_unanswered(session_id, raw_query, "confiance_faible", is_telecom=True)
@@ -2342,16 +2336,6 @@ async def chat(request: ChatRequest):
         admin_tag = " [ADMIN]" if h.get("is_admin") else ""
         logger.info("[CHUNK-%d] score=%.3f%s | %s | '%s'",
                     i+1, h["score"], admin_tag, h["filename"], h["text"][:60])
-
-    # =========================================================
-    # GÉNÉRATION DE LA RÉPONSE
-    # Les modes génératifs reçoivent lang directement → Qwen
-    # génère nativement en arabe sans post-traduction.
-    # Les modes non-génératifs (extractive, admin, fusion) passent
-    # par translate_french_to_arabic() à la fin.
-    # =========================================================
-
-    answer_mode = "no_context"
 
     if rag_used and chunks_for_answer and chunks_for_answer[0].get("is_admin"):
         answer = _strip_icons(clean_jsonl_artifacts(clean_chunk(chunks_for_answer[0]["text"])))
@@ -2366,16 +2350,13 @@ async def chat(request: ChatRequest):
             _global_metrics["fusion_used_count"] += 1
 
     elif rag_used and not EXTRACTIVE_MODE:
-        # FIX : on passe lang pour que Qwen génère dans la bonne langue
-        answer = _strip_icons(await run_in_threadpool(
-            generate_llm_answer, query, chunks_for_answer, lang))
+        answer = _strip_icons(await run_in_threadpool(generate_llm_answer, query, chunks_for_answer))
         answer_mode = "generative_rag"
         with _metrics_lock:
             _global_metrics["generative_count"] += 1
 
     elif rag_used:
-        answer = _strip_icons(await run_in_threadpool(
-            build_extractive_answer, chunks_for_answer, query))
+        answer = _strip_icons(await run_in_threadpool(build_extractive_answer, chunks_for_answer, query))
         answer_mode = "extractive"
         with _metrics_lock:
             _global_metrics["extractive_count"] += 1
@@ -2384,37 +2365,16 @@ async def chat(request: ChatRequest):
         answer = NO_INFO_RESPONSE_AR if lang == "ar" else FALLBACK_NO_INFO
         answer_mode = "no_context"
 
-    # Anti-hallucination
     if any(sig in answer.lower() for sig in HALLUCINATION_SIGNALS):
         if not any(sig in query.lower() for sig in HALLUCINATION_SIGNALS):
             log_unanswered(session_id, raw_query, "hallucination_concurrente", is_telecom=True)
-            answer_fallback = _strip_icons(
-                await run_in_threadpool(build_extractive_answer, chunks_for_answer, query)
-            )
-            if any(sig in answer_fallback.lower() for sig in HALLUCINATION_SIGNALS):
-                answer = NO_INFO_RESPONSE_AR if lang == "ar" else FALLBACK_NO_INFO
-                answer_mode = "no_context"
-                logger.warning("[HALLU] Extractif aussi contaminé → fallback no_info")
-            else:
-                answer = answer_fallback
-                answer_mode = "extractive_fallback"
+            answer = _strip_icons(await run_in_threadpool(build_extractive_answer, chunks_for_answer, query))
+            answer_mode = "extractive_fallback"
             with _metrics_lock:
                 _global_metrics["hallucination_count"] += 1
 
-    # =========================================================
-    # TRADUCTION POST-GÉNÉRATION
-    # Seulement pour les modes NON-génératifs (extractive, admin,
-    # fusion, no_context) quand la langue est l'arabe.
-    # Pour generative_rag, Qwen a déjà répondu en arabe.
-    # =========================================================
-    _GENERATIVE_MODES = {"generative_rag", "generative_rag_stream"}
-    response_answer = answer
-    if (lang == "ar" or lang_enum == Language.ARABIC) and answer_mode not in _GENERATIVE_MODES:
-        response_answer = translate_with_qwen(answer, raw_query)
-        logger.info("[QWEN-FR→AR] Réponse traduite (mode=%s, len=%d)", answer_mode, len(response_answer))
-
     save_message(session_id, "user", raw_query)
-    save_message(session_id, "assistant", response_answer)
+    save_message(session_id, "assistant", answer)
     elapsed = int((time.time() - t0) * 1000)
 
     with _metrics_lock:
@@ -2422,7 +2382,7 @@ async def chat(request: ChatRequest):
         _global_metrics["rag_used_count"] += int(rag_used)
         _global_metrics["total_latency_ms"] += elapsed
         _global_metrics["confidence_scores"].append(confidence)
-        _global_metrics["response_lengths"].append(len(response_answer))
+        _global_metrics["response_lengths"].append(len(answer))
 
     sources = [
         {
@@ -2435,7 +2395,7 @@ async def chat(request: ChatRequest):
     ]
 
     rt_metrics = compute_realtime_metrics(
-        question=raw_query, answer=response_answer,
+        question=raw_query, answer=answer,
         sources=hits if rag_used else [],
         rag_used=rag_used, confidence=confidence,
         response_time_ms=elapsed, mode=answer_mode,
@@ -2444,6 +2404,12 @@ async def chat(request: ChatRequest):
     logger.info("[%s] %dms | conf=%.3f | seuil=%.2f | lang=%s | rag=%s",
                 answer_mode, elapsed, confidence, adaptive_threshold, lang, rag_used)
 
+    # 🌍 TRADUCTION DE LA RÉPONSE EN ARABE si question en arabe (Helsinki-NLP)
+    response_answer = answer
+    if lang == "ar" or lang_enum == Language.ARABIC:
+        response_answer = translate_ar(answer)
+        logger.info("[HELSINKI-FR→AR] Réponse traduite (len: %d)", len(response_answer))
+
     return ChatResponse(
         session_id=session_id, answer=response_answer, sources=sources,
         is_telecom=True, rag_used=rag_used, confidence=confidence,
@@ -2451,7 +2417,6 @@ async def chat(request: ChatRequest):
 
 # =============================================================
 # ROUTE STREAMING SSE — /chat/stream
-# FIX LANGUE : lang transmis au thread de streaming
 # =============================================================
 
 @app.post("/chat/stream", tags=["Chat"])
@@ -2459,18 +2424,19 @@ async def chat_stream(request: ChatRequest):
     t0 = time.time()
     session_id = request.session_id or str(uuid.uuid4())
     raw_query = request.message.strip()
-
+    
     if not raw_query:
         raise HTTPException(400, "Message vide.")
-
+    
+    # =====================================================
+    # NLP MULTILINGUE — Détection + Traduction automatique
+    # =====================================================
     query, lang_enum, lang_str = process_query_nlp(raw_query)
-    lang = lang_str
-    logger.info(f"[STREAM-INPUT] Original: '{raw_query[:50]}' | Lang: {lang} | Processed: '{query[:50]}'")
+    lang = lang_str  # Pour compatibilité
+    logger.info(f"[STREAM-INPUT] Original: '{raw_query[:50]}...' | Lang: {lang} | Processed: '{query[:50]}...'")
 
     with _metrics_lock:
         _global_metrics["stream_requests"] += 1
-
-    _GENERATIVE_MODES = {"generative_rag", "generative_rag_stream"}
 
     async def event_generator():
         yield f'data: {json.dumps({"type":"start","session_id":session_id})}\n\n'
@@ -2507,8 +2473,6 @@ async def chat_stream(request: ChatRequest):
             admin_fuzzy = await run_in_threadpool(check_admin_enrichment_direct, query)
             if admin_fuzzy:
                 answer = _strip_icons(admin_fuzzy)
-                if lang == "ar" or lang_enum == Language.ARABIC:
-                    answer = translate_with_qwen(answer, raw_query)
                 yield f'data: {json.dumps({"type":"token","text":answer})}\n\n'
                 elapsed = int((time.time() - t0) * 1000)
                 yield f'data: {json.dumps({"type":"end","mode":"admin_direct","latency_ms":elapsed,"rag_used":True,"confidence":1.0})}\n\n'
@@ -2534,9 +2498,6 @@ async def chat_stream(request: ChatRequest):
             if rag_used and chunks_for_answer and chunks_for_answer[0].get("is_admin"):
                 answer = _strip_icons(clean_jsonl_artifacts(clean_chunk(chunks_for_answer[0]["text"])))
                 answer_mode = "admin_direct"
-                # Traduction pour admin_direct
-                if lang == "ar" or lang_enum == Language.ARABIC:
-                    answer = translate_with_qwen(answer, raw_query)
                 yield f'data: {json.dumps({"type":"token","text":answer})}\n\n'
                 full_answer_parts = [answer]
                 with _metrics_lock:
@@ -2545,9 +2506,6 @@ async def chat_stream(request: ChatRequest):
             elif rag_used and _is_multi_criteria_query(query):
                 fused = await run_in_threadpool(fuse_chunks_answer, chunks_for_answer, query)
                 answer_mode = "fusion_multi_criteria"
-                # Traduction pour fusion
-                if lang == "ar" or lang_enum == Language.ARABIC:
-                    fused = translate_with_qwen(fused, raw_query)
                 yield f'data: {json.dumps({"type":"token","text":fused})}\n\n'
                 full_answer_parts = [fused]
                 with _metrics_lock:
@@ -2560,8 +2518,7 @@ async def chat_stream(request: ChatRequest):
 
                 def _run_stream():
                     try:
-                        # FIX : passer lang au stream pour génération native arabe
-                        for token in generate_llm_answer_stream(query, chunks_for_answer, lang=lang):
+                        for token in generate_llm_answer_stream(query, chunks_for_answer):
                             loop.call_soon_threadsafe(token_queue.put_nowait, token)
                     except Exception as e:
                         loop.call_soon_threadsafe(token_queue.put_nowait, f"[ERR:{e}]")
@@ -2587,9 +2544,6 @@ async def chat_stream(request: ChatRequest):
                 answer = _strip_icons(await run_in_threadpool(
                     build_extractive_answer, chunks_for_answer, query))
                 answer_mode = "extractive"
-                # Traduction pour extractive
-                if lang == "ar" or lang_enum == Language.ARABIC:
-                    answer = translate_with_qwen(answer, raw_query)
                 yield f'data: {json.dumps({"type":"token","text":answer})}\n\n'
                 full_answer_parts = [answer]
                 with _metrics_lock:
@@ -2603,21 +2557,23 @@ async def chat_stream(request: ChatRequest):
 
             full_answer = "".join(full_answer_parts).strip()
 
-            # Anti-hallucination
             if any(sig in full_answer.lower() for sig in HALLUCINATION_SIGNALS):
                 if not any(sig in query.lower() for sig in HALLUCINATION_SIGNALS):
                     log_unanswered(session_id, raw_query, "hallucination_concurrente", is_telecom=True)
-                    fallback_ans = _strip_icons(await run_in_threadpool(
+                    full_answer = _strip_icons(await run_in_threadpool(
                         build_extractive_answer, chunks_for_answer, query))
-                    if lang == "ar" or lang_enum == Language.ARABIC:
-                        fallback_ans = translate_with_qwen(fallback_ans, raw_query)
-                    full_answer = fallback_ans
                     answer_mode = "extractive_fallback"
                     with _metrics_lock:
                         _global_metrics["hallucination_count"] += 1
 
+            # 🌍 TRADUCTION DE LA RÉPONSE EN ARABE si question en arabe (Helsinki-NLP)
+            stored_answer = full_answer
+            if lang == "ar" or lang_enum == Language.ARABIC:
+                stored_answer = translate_ar(full_answer)
+                logger.info("[HELSINKI-FR→AR-STREAM] Réponse traduite (len: %d)", len(stored_answer))
+
             save_message(session_id, "user", raw_query)
-            save_message(session_id, "assistant", full_answer)
+            save_message(session_id, "assistant", stored_answer)
             elapsed = int((time.time() - t0) * 1000)
 
             with _metrics_lock:
@@ -2767,24 +2723,32 @@ async def rag_add(req: RagEntryRequest, user=Depends(require_auth)):
     emb = encoder.encode([chunk_text], convert_to_numpy=True).tolist()
     try:
         _collection.add(
-            documents=[chunk_text], embeddings=emb,
+            documents=[chunk_text],
+            embeddings=emb,
             metadatas=[{
-                "file_name": "admin_enrichment", "filename": "admin_enrichment",
+                "file_name": "admin_enrichment",
+                "filename": "admin_enrichment",
                 "year": str(datetime.now().year),
                 "theme": req.theme or "enrichissement_admin",
-                "question": req.question[:200], "answer": req.answer[:500],
+                "question": req.question[:200],
+                "answer": req.answer[:500],
             }],
             ids=[chunk_id])
     except Exception as e:
         raise HTTPException(500, f"Erreur ajout ChromaDB : {e}")
-    _save_enrichment_db(chunk_id, req.question, req.answer,
-                        req.theme or "enrichissement_admin", req.source_note or "")
+    _save_enrichment_db(
+        chunk_id, req.question, req.answer,
+        req.theme or "enrichissement_admin", req.source_note or "")
     if req.unanswered_id:
         with _db_lock:
             with get_db() as conn:
-                conn.execute("DELETE FROM unanswered_questions WHERE id=?", (req.unanswered_id,))
-    return {"status": "ok", "chunk_id": chunk_id, "n_chunks": _collection.count(),
-            "fix_y_threshold": ADMIN_DIRECT_THRESHOLD}
+                conn.execute(
+                    "DELETE FROM unanswered_questions WHERE id=?", (req.unanswered_id,))
+    return {
+        "status": "ok", "chunk_id": chunk_id,
+        "n_chunks": _collection.count(),
+        "fix_y_threshold": ADMIN_DIRECT_THRESHOLD,
+    }
 
 @app.put("/admin/rag/update/{chunk_id}", tags=["RAG Admin"])
 async def rag_update(chunk_id: str, req: RagEntryRequest, user=Depends(require_auth)):
@@ -2795,18 +2759,22 @@ async def rag_update(chunk_id: str, req: RagEntryRequest, user=Depends(require_a
     emb = encoder.encode([chunk_text], convert_to_numpy=True).tolist()
     try:
         _collection.update(
-            documents=[chunk_text], embeddings=emb,
+            documents=[chunk_text],
+            embeddings=emb,
             metadatas=[{
-                "file_name": "admin_enrichment", "filename": "admin_enrichment",
+                "file_name": "admin_enrichment",
+                "filename": "admin_enrichment",
                 "year": str(datetime.now().year),
                 "theme": req.theme or "enrichissement_admin",
-                "question": req.question[:200], "answer": req.answer[:500],
+                "question": req.question[:200],
+                "answer": req.answer[:500],
             }],
             ids=[chunk_id])
     except Exception as e:
         raise HTTPException(500, f"Erreur update ChromaDB : {e}")
-    _save_enrichment_db(chunk_id, req.question, req.answer,
-                        req.theme or "enrichissement_admin", req.source_note or "")
+    _save_enrichment_db(
+        chunk_id, req.question, req.answer,
+        req.theme or "enrichissement_admin", req.source_note or "")
     return {"status": "ok", "chunk_id": chunk_id}
 
 @app.delete("/admin/rag/delete/{chunk_id}", tags=["RAG Admin"])
@@ -2832,6 +2800,7 @@ async def rag_entries(limit: int = 100, user=Depends(require_auth)):
 async def rag_test(q: str = Query(...), user=Depends(require_auth)):
     if not _collection:
         raise HTTPException(503, "ChromaDB non initialisé")
+
     fuzzy_result = None
     fuzzy_score = 0.0
     try:
@@ -2846,19 +2815,24 @@ async def rag_test(q: str = Query(...), user=Depends(require_auth)):
                         fuzz.token_set_ratio(q_norm, sq) / 100.0)
             if score > fuzzy_score:
                 fuzzy_score = score
-                fuzzy_result = {"question": row["question"], "answer": row["answer"][:200],
-                                "score": round(fuzzy_score, 4)}
+                fuzzy_result = {
+                    "question": row["question"],
+                    "answer": row["answer"][:200],
+                    "score": round(fuzzy_score, 4)
+                }
     except Exception as e:
         fuzzy_result = {"error": str(e)}
 
     fix_y_fires = fuzzy_score >= ADMIN_DIRECT_THRESHOLD
     is_multi_crit = _is_multi_criteria_query(q)
+
     encoder = _get_embed_model()
     q_emb = encoder.encode([q], convert_to_numpy=True).tolist()
     results = _collection.query(
         query_embeddings=q_emb,
         n_results=min(TOP_K * 3, _collection.count()),
         include=["documents", "metadatas", "distances"])
+
     admin_hits = []
     non_admin_hits = []
     for doc, meta, dist in zip(
@@ -2868,18 +2842,23 @@ async def rag_test(q: str = Query(...), user=Depends(require_auth)):
         fname = meta.get("file_name", meta.get("filename", ""))
         is_admin = fname == "admin_enrichment"
         entry = {
-            "is_admin": is_admin, "has_raw_table": _contains_raw_table(doc),
-            "score_raw": raw_score, "filename": fname,
-            "question": meta.get("question", "")[:100], "text_stored": doc[:150],
+            "is_admin": is_admin,
+            "has_raw_table": _contains_raw_table(doc),
+            "score_raw": raw_score,
+            "filename": fname,
+            "question": meta.get("question", "")[:100],
+            "text_stored": doc[:150],
         }
         if is_admin:
             admin_hits.append(entry)
         else:
             non_admin_hits.append(entry)
+
     non_admin_hits.sort(key=lambda x: x["score_raw"], reverse=True)
     admin_hits.sort(key=lambda x: x["score_raw"], reverse=True)
     topk_threshold = (non_admin_hits[TOP_K - 1]["score_raw"]
                       if len(non_admin_hits) >= TOP_K else 0.0)
+
     for h in admin_hits:
         raw = h["score_raw"]
         fixed = round(min(1.0, raw + ADMIN_SCORE_BOOST), 4)
@@ -2891,16 +2870,20 @@ async def rag_test(q: str = Query(...), user=Depends(require_auth)):
             h["score_final"] = fixed
             h["adaptive_boost_needed"] = False
         h["would_enter_topk"] = h["score_final"] >= (topk_threshold or 0)
+
     return {
-        "query": q, "top_k": TOP_K, "model": "qwen1.5",
+        "query": q, "top_k": TOP_K,
+        "model": "qwen1.5",
         "v2_fusion": {
             "is_multi_criteria": is_multi_crit,
             "would_use_fusion": is_multi_crit,
             "extended_k": TOP_K * 2 if is_multi_crit else TOP_K,
         },
         "fix_y_fuzzy": {
-            "threshold": ADMIN_DIRECT_THRESHOLD, "best_score": round(fuzzy_score, 4),
-            "fires": fix_y_fires, "best_match": fuzzy_result,
+            "threshold": ADMIN_DIRECT_THRESHOLD,
+            "best_score": round(fuzzy_score, 4),
+            "fires": fix_y_fires,
+            "best_match": fuzzy_result,
         },
         "admin_chunks": admin_hits,
         "top3_non_admin": non_admin_hits[:3],
@@ -2964,8 +2947,10 @@ async def conversations_stats(limit: int = 1000, user=Depends(require_auth)):
         except Exception:
             pass
     return {
-        "total_questions": total_q, "top5_questions": top5,
-        "top_themes": top_themes, "top2_per_theme": top2_per_theme,
+        "total_questions": total_q,
+        "top5_questions": top5,
+        "top_themes": top_themes,
+        "top2_per_theme": top2_per_theme,
         "hourly_distribution": [
             {"hour": int(h), "count": c}
             for h, c in sorted(hourly.items(), key=lambda x: int(x[0]))
@@ -3007,12 +2992,15 @@ async def metrics_perf(user=Depends(require_auth)):
         "tokens_generated": stats(tokens_gen),
         "stream_requests": stream_reqs,
         "config": {
-            "MAX_NEW_TOKENS": MAX_NEW_TOKENS, "MIN_NEW_TOKENS": MIN_NEW_TOKENS,
+            "MAX_NEW_TOKENS": MAX_NEW_TOKENS,
+            "MIN_NEW_TOKENS": MIN_NEW_TOKENS,
             "MAX_NEW_TOKENS_CAP": MAX_NEW_TOKENS_CAP,
             "TORCH_COMPILE": TORCH_COMPILE_ENABLED,
-            "tokenizer_max_length": 768, "TOP_K": TOP_K,
+            "tokenizer_max_length": 768,
+            "TOP_K": TOP_K,
             "COHERENCE_OVERLAP_MIN": COHERENCE_OVERLAP_MIN,
-            "REPETITION_PENALTY": REPETITION_PENALTY, "model": "qwen1.5",
+            "REPETITION_PENALTY": REPETITION_PENALTY,
+            "model": "qwen1.5",
         },
         "timestamp": datetime.now().isoformat(),
     }
@@ -3040,7 +3028,10 @@ async def metrics_tokens(limit: int = 50, user=Depends(require_auth)):
             "coherence_rejected_count": _global_metrics.get("coherence_rejected_count", 0),
             "second_rag_success": _global_metrics.get("second_rag_success", 0),
         },
-        "config": {"MIN_NEW_TOKENS": MIN_NEW_TOKENS, "MAX_NEW_TOKENS_CAP": MAX_NEW_TOKENS_CAP},
+        "config": {
+            "MIN_NEW_TOKENS": MIN_NEW_TOKENS,
+            "MAX_NEW_TOKENS_CAP": MAX_NEW_TOKENS_CAP,
+        },
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -3085,7 +3076,7 @@ async def get_metrics(user=Depends(require_auth)):
         "collection": COLLECTION_NAME,
         "chroma_dir": CHROMA_DB_DIR,
         "model_dir": MODEL_DIR,
-        "version": "2.2.0",
+        "version": "2.1.0",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -3102,7 +3093,7 @@ async def health():
     rate = round(100 * n_pos / n_fb, 1) if n_fb > 0 else 0
     return {
         "status": "ok" if n_chunks > 0 else "degraded",
-        "version": "2.2.0",
+        "version": "2.1.0",
         "model": "qwen1.5",
         "model_loaded": model_is_loaded(),
         "extractive_mode": EXTRACTIVE_MODE,
@@ -3122,7 +3113,6 @@ async def health():
             "metrics_routes": ["live", "perf", "tokens", "conversations/stats"],
             "feedback_routes": ["POST /feedback", "GET /feedback/stats"],
             "arabic_support": True,
-            "arabic_native_generation": True,
             "coherence_filter": f"overlap >= {COHERENCE_OVERLAP_MIN}",
             "whitelist_fr": f"{len(_COMMON_WORDS_FR)} mots",
             "top_k": TOP_K,
@@ -3131,7 +3121,6 @@ async def health():
             "require_auth_admin": True,
             "typo_correction": "fuzzy + phonetic + levenshtein",
             "second_rag_attempt": True,
-            "lang_fix": "build_generative_prompt(lang=) propagated end-to-end",
         },
         "timestamp": datetime.now().isoformat(),
     }
@@ -3151,8 +3140,8 @@ async def root():
     if os.path.isfile(html_path):
         return FileResponse(html_path)
     return {
-        "message": "Chatbot Tunisie Telecom API — Qwen1.5 v2.2",
-        "version": "2.2.0",
+        "message": "Chatbot Tunisie Telecom API — Qwen1.5 v2.1",
+        "version": "2.1.0",
         "docs": "/docs",
     }
 
@@ -3163,7 +3152,7 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 60)
-    print("  Chatbot Tunisie Telecom — Qwen1.5  v2.2")
+    print("  Chatbot Tunisie Telecom — Qwen1.5  v2.1")
     print(f"  ChromaDB  : {CHROMA_DB_DIR} / {COLLECTION_NAME}")
     print(f"  Modèle    : {MODEL_DIR}")
     print(f"  Base      : {BASE_MODEL}")
@@ -3172,11 +3161,14 @@ if __name__ == "__main__":
     print(f"  TOP_K     : {TOP_K}")
     print(f"  Port      : {API_PORT}")
     print()
-    print("  [v2.2] FIX LANGUE ARABE :")
-    print("    - build_generative_prompt(lang=) : system_msg bilingue natif")
-    print("    - generate_llm_answer(lang=) : Qwen génère directement en arabe")
-    print("    - generate_llm_answer_stream(lang=) : idem en streaming")
-    print("    - translate_french_to_arabic() : seulement pour extractive/admin/fusion")
-    print("    - Pas de double traduction pour generative_rag")
+    print("  [v2.1] CORRECTIONS INTÉGRÉES :")
+    print("    - Correction orthographique avancée (fuzzy + phonétique + Levenshtein)")
+    print("    - Anti‑hallucination concurrents (Ooredoo/Orange refusés)")
+    print("    - Re‑ranking tarifaire pour les questions de prix")
+    print("    - Second essai RAG avec requête simplifiée")
+    print("    - Seuils adaptatifs THRESHOLD_LONG_QUERY=0.42, THRESHOLD_SHORT_QUERY=0.35")
+    print("    - CORRECTIONS_DIRECTES enrichi (asbl→adsl, esem→esim, romming→roaming, etc.)")
+    print("    - VOCAB_TELECOM élargi")
+    print("    - TELECOM_THEME_KEYWORDS enrichi + detect_theme() par score")
     print("=" * 60)
     uvicorn.run(app, host=API_HOST, port=API_PORT, reload=False, log_level="info")
