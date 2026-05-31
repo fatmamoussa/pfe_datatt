@@ -1,0 +1,73 @@
+# =============================================================
+# docker-compose.yml — Dev local
+# Usage : docker compose up --build
+# =============================================================
+
+version: "3.9"
+
+services:
+  chatbot-qwen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tt-chatbot-qwen
+    image: tt-chatbot-qwen:latest
+
+    # ── GPU (décommenter si GPU disponible en local) ──────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    ports:
+      - "8002:8002"
+
+    environment:
+      # Modèle
+      - MODEL_DIR_QWEN=/app/models/qwen15-1b8-tt-merged
+      - EXTRACTIVE_MODE=false
+      - MAX_NEW_TOKENS=150
+      - TOP_K=3
+      - TORCH_COMPILE=false
+
+      # ChromaDB
+      - CHROMA_DB_DIR=/app/chroma_tt_db
+      - COLLECTION_NAME=tt_train
+
+      # Base SQLite
+      - DB_PATH=/app/data/chatbot.db
+
+      # Seuils RAG
+      - ADMIN_SCORE_BOOST=0.10
+      - ADMIN_DIRECT_THRESHOLD=0.72
+      - CONFIDENCE_THRESHOLD=0.45
+      - COHERENCE_OVERLAP_MIN=0.10
+
+      # API
+      - API_PORT=8002
+
+    volumes:
+      # Monter tes fichiers locaux pour éviter de rebuild à chaque modif
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./chroma_tt_db:/app/chroma_tt_db
+      - ./static:/app/static
+      - ./logs:/app/logs
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

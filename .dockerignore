@@ -1,0 +1,64 @@
+# =============================================================
+# .dockerignore — exclure les fichiers lourds du build context
+# =============================================================
+
+# Modèles (trop lourds, montés via Azure File Share)
+models/
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+
+# ChromaDB local (monté en volume)
+chroma_tt_db/
+
+# Données locales
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+.env
+
+# Logs
+logs/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Dev
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Tests & docs
+tests/
+notebooks/
+*.ipynb
+README.md
+docs/
+
+# Eval files
+eval_*.json
+*_results.json
+
+# Scripts de fine-tuning (pas nécessaires en prod)
+finetune_*.py
+build_chromadb_index.py
